@@ -1,90 +1,100 @@
-import streamlit as st
 import os
+import streamlit as st
 import pandas as pd
-from lightrag import RAGPipeline
-from lightrag.embeddings import HuggingFaceEmbedding
-from lightrag.llms import OpenRouterLLM
-from lightrag.vectorstores import FAISS
-from lightrag.document_loaders import SimpleDirectoryReader
+import openai
+import whisper
+import yt_dlp
 
-# Autenticação com senha (segura com variável de ambiente)
-def autenticar():
-    senha_correta = os.getenv("APP_SENHA", "sem_senha")
-    senha = st.text_input("🔐 Digite a senha para acessar:", type="password")
-    if senha != senha_correta:
-        st.warning("Senha incorreta ou ausente.")
-        st.stop()
+from lightrag import LightRAG
 
-autenticar()
+# Configuração do OpenRouter
+openai.api_key = os.getenv("OPENROUTER_API_KEY")
+openai.api_base = "https://openrouter.ai/api/v1"
 
-st.title("📄 RAG Técnico para Telecomunicações")
+st.set_page_config(page_title="RAG Otimizador Técnico", layout="wide")
 
-# Upload de arquivos
-st.subheader("📤 Envie seus documentos técnicos e planilhas com dados")
-uploaded_files = st.file_uploader("Arraste ou envie arquivos PDF, TXT, CSV", accept_multiple_files=True)
+# Proteção com senha
+st.markdown("### 🔐 Acesso Restrito")
+senha = st.text_input("Digite a senha para acessar:", type="password")
 
-dados_df = None
+if senha != os.getenv("APP_SENH"):
+    st.warning("Acesso negado. Digite a senha correta para continuar.")
+    st.stop()
+st.title("📡 Otimizador Inteligente com RAG")
+st.markdown("Envie planilhas, documentos ou links de vídeo e pergunte sobre sua rede.")
 
-if uploaded_files:
-    os.makedirs("data", exist_ok=True)
-    for file in uploaded_files:
-        file_path = os.path.join("data", file.name)
-        with open(file_path, "wb") as f:
-            f.write(file.read())
+# Carregando modelo de áudio
+model = whisper.load_model("base")
 
-        # Se for CSV, processa como DataFrame também
-        if file.name.endswith(".csv"):
-            try:
-                df_temp = pd.read_csv(file_path)
-                if dados_df is None:
-                    dados_df = df_temp
-                else:
-                    dados_df = pd.concat([dados_df, df_temp], ignore_index=True)
-            except Exception as e:
-                st.warning(f"Erro ao ler {file.name} como CSV: {e}")
+# Transcrição YouTube
+@st.cache_data
+def transcrever_audio_do_youtube(url):
+    with yt_dlp.YoutubeDL({'format': 'bestaudio', 'outtmpl': 'audio.%(ext)s'}) as ydl:
+        info = ydl.extract_info(url, download=True)
+        filename = ydl.prepare_filename(info)
+    result = model.transcribe(filename)
+    return result["text"]
 
-    st.success("Documentos salvos com sucesso!")
+docs = []
 
-    # Inicializa o pipeline RAG
-    st.info("🔄 Indexando os documentos...")
-    documents = SimpleDirectoryReader("data").load()
+# 📊 Upload CSV
+csv_file = st.file_uploader("📈 Envie um arquivo CSV com os dados", type=["csv"])
+if csv_file:
+    df = pd.read_csv(csv_file)
+    st.success("CSV carregado com sucesso!")
+    st.dataframe(df.head())
 
-    embed_model = HuggingFaceEmbedding("BAAI/bge-base-en-v1.5")
-    vectorstore = FAISS.from_documents(documents, embed_model)
+    for _, row in df.iterrows():
+        entrada = " | ".join([f"{col}: {row[col]}" for col in df.columns])
+        docs.append(entrada)
 
-    llm = OpenRouterLLM(
-        api_key=os.getenv("OPENROUTER_API_KEY"),  # variável de ambiente segura
-        model="openai/gpt-3.5-turbo"
-    )
+# 📄 Upload de documentos
+uploaded_docs = st.file_uploader("📄 Envie arquivos .txt ou .pdf", type=["txt", "pdf"], accept_multiple_files=True)
+if uploaded_docs:
+    for file in uploaded_docs:
+        content = file.read().decode("utf-8", errors="ignore")
+        docs.append(content)
 
-    pipeline = RAGPipeline(retriever=vectorstore.as_retriever(), llm=llm)
-    st.success("Documentos prontos para consulta.")
+# 📺 Link do YouTube
+youtube_link = st.text_input("🎥 Cole um link de vídeo do YouTube para transcrição automática:")
+if youtube_link:
+    with st.spinner("Transcrevendo áudio do vídeo..."):
+        try:
+            transcricao = transcrever_audio_do_youtube(youtube_link)
+            st.success("Transcrição concluída!")
+            st.text_area("📝 Texto extraído do vídeo:", transcricao, height=200)
+            docs.append(transcricao)
+        except Exception as e:
+            st.error(f"Erro ao transcrever vídeo: {e}")
 
-    # Interface de perguntas
-    st.subheader("🔎 Faça perguntas sobre os documentos e dados carregados")
-    query = st.text_input("Digite sua pergunta técnica:")
-    if query:
-        with st.spinner("Consultando documentos e dados..."):
-            contexto_extra = ""
-            if dados_df is not None:
-                colunas_criticas = [col for col in dados_df.columns if any(palavra in col.lower() for palavra in ["taxa", "ue", "indice"])]
-                dados_criticos = dados_df.copy()
-                for col in colunas_criticas:
-                    try:
-                        dados_criticos = dados_criticos[dados_criticos[col] >= 8]
-                    except:
-                        pass  # ignora colunas não numéricas
-                contexto_extra = dados_criticos.to_string(index=False)
-            result = pipeline.invoke(query + "\n\nDados críticos:\n" + contexto_extra)
-            st.markdown("### 🧠 Resposta")
-            st.write(result)
+# RAG e Pergunta
+if docs:
+    rag = LightRAG(docs)
+    rag.create_index()
 
-# Exemplo de perguntas sugeridas
-with st.expander("💡 Exemplos de perguntas técnicas"):
-    st.markdown("""
-    - Quais sites com índice_taxa ou ue_medio igual a 10 precisam de atenção?
-    - Quais são os piores valores registrados por município?
-    - O que fazer com um site com alto ue_medio e índice de retransmissão?
-    - Existe alguma recomendação nos documentos para valores críticos?
-    - Como melhorar um site com valores ruins em várias colunas?
-    """)
+    user_question = st.text_input("🧠 Faça uma pergunta técnica:")
+    if user_question:
+        contexto = "\n".join(docs[:15])
+        prompt = f"""
+Você é um especialista técnico em redes móveis.
+
+DADOS:
+{contexto}
+
+PERGUNTA:
+{user_question}
+
+OBSERVAÇÃO:
+Valores altos (ex: 10) em colunas como 'índice_taxa' e 'ue_medio' representam pior desempenho da rede.
+Use esse conhecimento para recomendar ações de melhoria.
+"""
+
+        try:
+            response = openai.ChatCompletion.create(
+                model="openchat/openchat-3.5-0106",
+                messages=[{"role": "user", "content": prompt}]
+            )
+            st.markdown("### ✅ Resposta da IA:")
+            st.success(response['choices'][0]['message']['content'])
+        except Exception as e:
+            st.error(f"Erro ao consultar a IA: {e}")
