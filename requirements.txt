@@ -1,6 +1,6 @@
 streamlit
 lightrag
-openai == 0.27.4
+openai
 pandas
 yt-dlp
 whisper
