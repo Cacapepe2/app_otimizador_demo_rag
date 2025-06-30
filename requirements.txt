@@ -1,0 +1,7 @@
+streamlit
+lightrag
+openai
+pandas
+yt-dlp
+whisper
+torch
