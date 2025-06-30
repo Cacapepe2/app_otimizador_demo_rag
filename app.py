@@ -17,7 +17,7 @@ st.set_page_config(page_title="RAG Otimizador Técnico", layout="wide")
 st.markdown("### 🔐 Acesso Restrito")
 senha = st.text_input("Digite a senha para acessar:", type="password")
 
-if senha != os.getenv("APP_SENH"):
+if senha != os.getenv("APP_SENHA"):
     st.warning("Acesso negado. Digite a senha correta para continuar.")
     st.stop()
 st.title("📡 Otimizador Inteligente com RAG")
