@@ -1,8 +1,8 @@
 streamlit
-lightrag
+lightrag @ git+https://github.com/Cacapepe2/lightrag-sem-tiktoken.git
 openai
 pandas
 yt-dlp
 whisper
 torch
-tiktoken == 0.5.1
+
