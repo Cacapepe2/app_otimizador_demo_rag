@@ -24,7 +24,7 @@ st.title("📡 Otimizador Inteligente com RAG")
 st.markdown("Envie planilhas, documentos ou links de vídeo e pergunte sobre sua rede.")
 
 # Carregando modelo de áudio
-model = whisper.load_model("base")
+model = whisper.load_model("tiny")
 
 # Transcrição YouTube
 @st.cache_data
