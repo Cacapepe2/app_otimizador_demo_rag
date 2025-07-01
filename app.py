@@ -4,6 +4,7 @@ import pandas as pd
 import openai
 import whisper
 import yt_dlp
+import tempfile
 
 from lightrag import LightRAG
 
@@ -20,21 +21,48 @@ senha = st.text_input("Digite a senha para acessar:", type="password")
 if senha != os.getenv("APP_SENHA"):
     st.warning("Acesso negado. Digite a senha correta para continuar.")
     st.stop()
+
 st.title("📡 Otimizador Inteligente com RAG")
 st.markdown("Envie planilhas, documentos ou links de vídeo e pergunte sobre sua rede.")
 
-# Carregando modelo de áudio
-model = whisper.load_model("tiny")
+# 🔊 Carregamento do modelo Whisper apenas sob demanda
+@st.cache_resource(show_spinner="🔊 Carregando modelo Whisper...")
+def carregar_modelo_whisper():
+    return whisper.load_model("tiny")
 
-# Transcrição YouTube
-@st.cache_data
+# 📺 Transcrição YouTube (otimizada)
 def transcrever_audio_do_youtube(url):
-    with yt_dlp.YoutubeDL({'format': 'bestaudio', 'outtmpl': 'audio.%(ext)s'}) as ydl:
-        info = ydl.extract_info(url, download=True)
-        filename = ydl.prepare_filename(info)
-    result = model.transcribe(filename)
-    return result["text"]
+    try:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ydl_opts = {
+                'format': 'bestaudio/best',
+                'outtmpl': os.path.join(temp_dir, 'audio.%(ext)s'),
+                'postprocessors': [{
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': 'mp3',
+                    'preferredquality': '192',
+                }],
+                'quiet': True
+            }
 
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                filename = None
+                for f in os.listdir(temp_dir):
+                    if f.endswith(".mp3"):
+                        filename = os.path.join(temp_dir, f)
+                        break
+
+            if filename:
+                model = carregar_modelo_whisper()
+                result = model.transcribe(filename)
+                return result["text"]
+            else:
+                return "Erro ao processar o áudio."
+    except Exception as e:
+        return f"Erro: {e}"
+
+# 📚 Coleta de documentos
 docs = []
 
 # 📊 Upload CSV
@@ -59,13 +87,10 @@ if uploaded_docs:
 youtube_link = st.text_input("🎥 Cole um link de vídeo do YouTube para transcrição automática:")
 if youtube_link:
     with st.spinner("Transcrevendo áudio do vídeo..."):
-        try:
-            transcricao = transcrever_audio_do_youtube(youtube_link)
-            st.success("Transcrição concluída!")
-            st.text_area("📝 Texto extraído do vídeo:", transcricao, height=200)
-            docs.append(transcricao)
-        except Exception as e:
-            st.error(f"Erro ao transcrever vídeo: {e}")
+        transcricao = transcrever_audio_do_youtube(youtube_link)
+        st.success("Transcrição concluída!")
+        st.text_area("📝 Texto extraído do vídeo:", transcricao, height=200)
+        docs.append(transcricao)
 
 # RAG e Pergunta
 if docs:
@@ -91,10 +116,12 @@ Use esse conhecimento para recomendar ações de melhoria.
 
         try:
             response = openai.ChatCompletion.create(
-                model="openchat/openchat-3.5-0106",
+                model="openchat/openchat-3.5-0106",  # Pode trocar por outro modelo do OpenRouter
                 messages=[{"role": "user", "content": prompt}]
             )
             st.markdown("### ✅ Resposta da IA:")
             st.success(response['choices'][0]['message']['content'])
         except Exception as e:
             st.error(f"Erro ao consultar a IA: {e}")
+else:
+    st.info("📥 Envie arquivos ou links para começar.")
