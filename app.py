@@ -74,7 +74,7 @@ if csv_file:
         try:
             # Cria novo buffer com o conteúdo original
             csv_file_data = csv_file.getvalue()
-            df = pd.read_csv(pd.io.common.BytesIO(csv_file_data), encoding='ISO-8859-1')
+            df = pd.read_csv(pd.io.common.BytesIO(csv_file_data), encoding='ISO-8859-1', delimiter=';')
         except Exception as e:
             st.error(f"Erro ao tentar ler o arquivo CSV: {e}")
             df = None
