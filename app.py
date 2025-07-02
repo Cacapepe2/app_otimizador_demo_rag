@@ -69,13 +69,12 @@ docs = []
 csv_file = st.file_uploader("📈 Envie um arquivo CSV com os dados", type=["csv"])
 if csv_file:
     try:
-        # Primeiro tenta UTF-8
         df = pd.read_csv(csv_file)
     except UnicodeDecodeError:
         try:
-            # Se falhar, tenta ISO-8859-1 (latin1)
-            csv_file.seek(0)
-            df = pd.read_csv(csv_file, encoding='ISO-8859-1')
+            # Cria novo buffer com o conteúdo original
+            csv_file_data = csv_file.getvalue()
+            df = pd.read_csv(pd.io.common.BytesIO(csv_file_data), encoding='ISO-8859-1')
         except Exception as e:
             st.error(f"Erro ao tentar ler o arquivo CSV: {e}")
             df = None
