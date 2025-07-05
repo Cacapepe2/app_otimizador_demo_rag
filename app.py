@@ -129,7 +129,7 @@ Use esse conhecimento para recomendar ações de melhoria.
 
         try:
             response = client.chat.completions.create(
-                model="openai/gpt-3.5-turbo-0125",  # Pode trocar por outro modelo do OpenRouter
+                model="deepseek/deepseek-r1-0528:free",  # Pode trocar por outro modelo do OpenRouter
                 messages=[{"role": "user", "content": prompt}]
             )
             st.markdown("### ✅ Resposta da IA:")
