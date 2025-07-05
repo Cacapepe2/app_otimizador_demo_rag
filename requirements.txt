@@ -1,6 +1,6 @@
 streamlit
 lightrag @ git+https://github.com/Cacapepe2/lightrag-sem-tiktoken.git
-openai
+openai ==0.28.1
 pandas
 yt-dlp
 whisper
