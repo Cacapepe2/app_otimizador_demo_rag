@@ -141,7 +141,7 @@ PERGUNTA:
 
         try:
             response = client.chat.completions.create(
-                model="openai/gpt-3.5-turbo-0125",
+                model="deepseek/deepseek-r1-0528:free",
                 messages=[{"role": "user", "content": prompt}]
             )
             st.markdown("### ✅ Resposta da IA:")
