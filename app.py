@@ -82,10 +82,11 @@ if csv_file:
     if df is not None:
         st.success("CSV carregado com sucesso!")
         st.dataframe(df.head())
-
-        for _, row in df.iterrows():
-            entrada = " | ".join([f"{col}: {row[col]}" for col in df.columns])
+        for chunk in pd.read_csv(csv_file, chunksize=1000):
+            for _, row in chunk.iterrows():
+            entrada = " | ".join([f"{col}: {row[col]}" for col in chunk.columns])
             docs.append(entrada)
+
 
 # 📄 Upload de documentos
 uploaded_docs = st.file_uploader("📄 Envie arquivos .txt ou .pdf", type=["txt", "pdf"], accept_multiple_files=True)
