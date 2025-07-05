@@ -84,8 +84,8 @@ if csv_file:
         st.dataframe(df.head())
         for chunk in pd.read_csv(csv_file, chunksize=1000):
             for _, row in chunk.iterrows():
-            entrada = " | ".join([f"{col}: {row[col]}" for col in chunk.columns])
-            docs.append(entrada)
+                entrada = " | ".join([f"{col}: {row[col]}" for col in chunk.columns])
+                docs.append(entrada)
 
 
 # 📄 Upload de documentos
