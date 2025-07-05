@@ -100,10 +100,13 @@ if uploaded_docs:
 youtube_link = st.text_input("🎥 Cole um link de vídeo do YouTube para transcrição automática:")
 if youtube_link:
     with st.spinner("Transcrevendo áudio do vídeo..."):
-        transcricao = transcrever_audio_do_youtube(youtube_link)
-        st.success("Transcrição concluída!")
-        st.text_area("📝 Texto extraído do vídeo:", transcricao, height=200)
-        docs.append(transcricao)
+        try:
+            transcricao = transcrever_audio_do_youtube(youtube_link)
+            st.success("Transcrição concluída!")
+            st.text_area("📝 Texto extraído do vídeo:", transcricao, height=200)
+            docs.append(transcricao)
+        except Exception as e:
+            st.error(f"Erro ao transcrever vídeo: {e}")
 
 # RAG e Pergunta
 if docs:
@@ -113,6 +116,17 @@ if docs:
     user_question = st.text_input("🧠 Faça uma pergunta técnica:")
     if user_question:
         contexto = "\n".join(docs[:15])
+
+        # 🔍 Detectar colunas técnicas presentes
+        colunas_relevantes = ['índice_taxa', 'ue_medio', 'site', 'bts']
+        colunas_presentes = [col for col in colunas_relevantes if any(col in d.lower() for d in docs)]
+
+        if colunas_presentes:
+            observacao = "OBSERVAÇÃO: Valores altos em colunas como " + ", ".join(colunas_presentes) + " representam pior desempenho da rede."
+        else:
+            observacao = ""  # não adiciona se não for relevante
+
+        # 🔧 Prompt final adaptado
         prompt = f"""
 Você é um especialista técnico em redes móveis.
 
@@ -122,14 +136,12 @@ DADOS:
 PERGUNTA:
 {user_question}
 
-OBSERVAÇÃO:
-Valores altos (ex: 10) em colunas como 'índice_taxa' e 'ue_medio' representam pior desempenho da rede.
-Use esse conhecimento para recomendar ações de melhoria.
+{observacao}
 """
 
         try:
             response = client.chat.completions.create(
-                model="deepseek/deepseek-r1-0528:free",  # Pode trocar por outro modelo do OpenRouter
+                model="openai/gpt-3.5-turbo-0125",
                 messages=[{"role": "user", "content": prompt}]
             )
             st.markdown("### ✅ Resposta da IA:")
