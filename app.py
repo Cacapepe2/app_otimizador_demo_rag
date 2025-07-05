@@ -1,7 +1,7 @@
 import os
 import streamlit as st
 import pandas as pd
-import openai
+from openai import OpenAI
 import whisper
 import yt_dlp
 import tempfile
@@ -9,9 +9,10 @@ import tempfile
 from lightrag import LightRAG
 
 # Configuração do OpenRouter
-openai.api_key = os.getenv("OPENROUTER_API_KEY")
-openai.api_base = "https://openrouter.ai/api/v1"
-
+client = OpenAI(
+    api_key=os.getenv("OPENROUTER_API_KEY"),
+    base_url="https://openrouter.ai/api/v1"
+)
 st.set_page_config(page_title="RAG Otimizador Técnico", layout="wide")
 
 # Proteção com senha
@@ -127,12 +128,12 @@ Use esse conhecimento para recomendar ações de melhoria.
 """
 
         try:
-            response = openai.ChatCompletion.create(
-                model="openchat/openchat-3.5-0106",  # Pode trocar por outro modelo do OpenRouter
+            response = client.chat.completions.create(
+                model="openai/gpt-3.5-turbo-0125",  # Pode trocar por outro modelo do OpenRouter
                 messages=[{"role": "user", "content": prompt}]
             )
             st.markdown("### ✅ Resposta da IA:")
-            st.success(response['choices'][0]['message']['content'])
+            st.success(response.choices[0].message.content)
         except Exception as e:
             st.error(f"Erro ao consultar a IA: {e}")
 else:
