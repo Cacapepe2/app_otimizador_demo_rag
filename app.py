@@ -36,13 +36,14 @@ def transcrever_audio_do_youtube(url):
     try:
         with tempfile.TemporaryDirectory() as temp_dir:
             ydl_opts = {
-                'format': 'bestaudio/best',
-                'outtmpl': os.path.join(temp_dir, 'audio.%(ext)s'),
-                'postprocessors': [{
-                    'key': 'FFmpegExtractAudio',
-                    'preferredcodec': 'mp3',
-                    'preferredquality': '192',
-                }],
+        'format': 'bestaudio',
+        'outtmpl': 'audio.%(ext)s',
+        'quiet': True,
+    }
+
+    if os.path.exists("youtube_cookies.txt"):
+        ydl_opts["cookies"] = "youtube_cookies.txt"
+],
                 'quiet': True
             }
 
@@ -141,11 +142,15 @@ PERGUNTA:
 
         try:
             response = client.chat.completions.create(
-                model="deepseek/deepseek-r1-0528:free",
-                messages=[{"role": "user", "content": prompt}]
-            )
-            st.markdown("### ✅ Resposta da IA:")
-            st.success(response.choices[0].message.content)
+    model="deepseek/deepseek-chat-v3-0324:free",
+    messages=[{"role": "user", "content": prompt}]
+)
+
+if response and hasattr(response, "choices") and response.choices:
+    st.markdown("### ✅ Resposta da IA:")
+    st.success(response.choices[0].message.content)
+else:
+    st.warning("⚠️ A resposta da IA veio vazia ou malformada.")
         except Exception as e:
             st.error(f"Erro ao consultar a IA: {e}")
 else:
