@@ -112,14 +112,15 @@ if youtube_link:
         except Exception as e:
             st.error(f"Erro ao transcrever vídeo: {e}")
 
+# Campo de pergunta sempre visível
+user_question = st.text_input("🧠 Faça uma pergunta técnica:")
 
 # RAG e Pergunta
-if docs:
-    rag = LightRAG(docs)
-    rag.create_index()
+if user_question:
+    if docs:
+        rag = LightRAG(docs)
+        rag.create_index()
 
-    user_question = st.text_input("🧠 Faça uma pergunta técnica:")
-    if user_question:
         contexto = "\n".join(docs[:15])  # pode ajustar para mais docs se quiser
 
         # 🔍 Detectar colunas no CSV (não nos docs)
@@ -134,8 +135,12 @@ if docs:
         else:
             observacao = ""
 
-        # Prompt final enviado para a IA
-        prompt = f"""
+    else:
+        contexto = ""
+        observacao = ""
+
+    # Prompt final enviado para a IA
+    prompt = f"""
 Você é um especialista técnico em redes móveis.
 
 DADOS:
@@ -147,17 +152,17 @@ PERGUNTA:
 {observacao}
 """
 
-        try:
-            response = client.chat.completions.create(
-                model="deepseek/deepseek-chat-v3-0324:free",
-                messages=[{"role": "user", "content": prompt}]
-            )
+    try:
+        response = client.chat.completions.create(
+            model="deepseek/deepseek-chat-v3-0324:free",
+            messages=[{"role": "user", "content": prompt}]
+        )
 
-            if response and hasattr(response, "choices") and response.choices:
-                st.markdown("### ✅ Resposta da IA:")
-                st.success(response.choices[0].message.content)
-            else:
-                st.warning("⚠️ A resposta da IA veio vazia ou malformada.")
+        if response and hasattr(response, "choices") and response.choices:
+            st.markdown("### ✅ Resposta da IA:")
+            st.success(response.choices[0].message.content)
+        else:
+            st.warning("⚠️ A resposta da IA veio vazia ou malformada.")
 
-        except Exception as e:
-            st.error(f"Erro ao consultar a IA: {e}")
+    except Exception as e:
+        st.error(f"Erro ao consultar a IA: {e}")
