@@ -31,21 +31,17 @@ st.markdown("Envie planilhas, documentos ou links de vídeo e pergunte sobre sua
 def carregar_modelo_whisper():
     return whisper.load_model("tiny")
 
-# 📺 Transcrição YouTube (otimizada)
 def transcrever_audio_do_youtube(url):
     try:
         with tempfile.TemporaryDirectory() as temp_dir:
             ydl_opts = {
-        'format': 'bestaudio',
-        'outtmpl': 'audio.%(ext)s',
-        'quiet': True,
-    }
-
-    if os.path.exists("youtube_cookies.txt"):
-        ydl_opts["cookies"] = "youtube_cookies.txt"
-],
+                'format': 'bestaudio',
+                'outtmpl': os.path.join(temp_dir, 'audio.%(ext)s'),
                 'quiet': True
             }
+
+            if os.path.exists("youtube_cookies.txt"):
+                ydl_opts["cookies"] = "youtube_cookies.txt"
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=True)
@@ -97,6 +93,13 @@ if uploaded_docs:
         content = file.read().decode("utf-8", errors="ignore")
         docs.append(content)
 
+# 🔐 Upload manual do arquivo de cookies do YouTube
+cookie_file = st.file_uploader("🔑 Envie seu arquivo 'youtube_cookies.txt' (opcional)", type=["txt"])
+if cookie_file:
+    with open("youtube_cookies.txt", "wb") as f:
+        f.write(cookie_file.read())
+    st.success("Arquivo de cookies salvo com sucesso!")
+
 # 📺 Link do YouTube
 youtube_link = st.text_input("🎥 Cole um link de vídeo do YouTube para transcrição automática:")
 if youtube_link:
@@ -142,16 +145,15 @@ PERGUNTA:
 
         try:
             response = client.chat.completions.create(
-    model="deepseek/deepseek-chat-v3-0324:free",
-    messages=[{"role": "user", "content": prompt}]
-)
+                model="deepseek/deepseek-chat-v3-0324:free",
+                messages=[{"role": "user", "content": prompt}]
+            )
 
-if response and hasattr(response, "choices") and response.choices:
-    st.markdown("### ✅ Resposta da IA:")
-    st.success(response.choices[0].message.content)
-else:
-    st.warning("⚠️ A resposta da IA veio vazia ou malformada.")
+            if response and hasattr(response, "choices") and response.choices:
+                st.markdown("### ✅ Resposta da IA:")
+                st.success(response.choices[0].message.content)
+            else:
+                st.warning("⚠️ A resposta da IA veio vazia ou malformada.")
+
         except Exception as e:
             st.error(f"Erro ao consultar a IA: {e}")
-else:
-    st.info("📥 Envie arquivos ou links para começar.")
