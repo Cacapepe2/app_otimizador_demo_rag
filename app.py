@@ -112,6 +112,7 @@ if youtube_link:
         except Exception as e:
             st.error(f"Erro ao transcrever vídeo: {e}")
 
+
 # RAG e Pergunta
 if docs:
     rag = LightRAG(docs)
@@ -119,18 +120,21 @@ if docs:
 
     user_question = st.text_input("🧠 Faça uma pergunta técnica:")
     if user_question:
-        contexto = "\n".join(docs[:15])
+        contexto = "\n".join(docs[:15])  # pode ajustar para mais docs se quiser
 
-        # 🔍 Detectar colunas técnicas presentes
+        # 🔍 Detectar colunas no CSV (não nos docs)
         colunas_relevantes = ['índice_taxa', 'ue_medio', 'site', 'bts']
-        colunas_presentes = [col for col in colunas_relevantes if any(col in d.lower() for d in docs)]
+        colunas_presentes = []
+        if 'df' in locals() and df is not None:
+            colunas_presentes = [col for col in colunas_relevantes if col in df.columns]
 
+        # Observação só se houver colunas conhecidas no CSV
         if colunas_presentes:
             observacao = "OBSERVAÇÃO: Valores altos em colunas como " + ", ".join(colunas_presentes) + " representam pior desempenho da rede."
         else:
-            observacao = ""  # não adiciona se não for relevante
+            observacao = ""
 
-        # 🔧 Prompt final adaptado
+        # Prompt final enviado para a IA
         prompt = f"""
 Você é um especialista técnico em redes móveis.
 
