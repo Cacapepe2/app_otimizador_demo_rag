@@ -154,7 +154,7 @@ PERGUNTA:
 
     try:
         response = client.chat.completions.create(
-            model="deepseek/deepseek-r1-0528:free",
+            model="deepseek/deepseek-chat-v3-0324",
             messages=[{"role": "user", "content": prompt}]
         )
 
