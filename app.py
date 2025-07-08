@@ -154,7 +154,7 @@ PERGUNTA:
 
     try:
         response = client.chat.completions.create(
-            model="google/gemini-2.0-flash-exp:free",
+            model="google/gemini-1.5-flas",
             messages=[{"role": "user", "content": prompt}]
         )
 
