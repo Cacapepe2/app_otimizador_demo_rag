@@ -154,7 +154,7 @@ PERGUNTA:
 
     try:
         response = client.chat.completions.create(
-            model="google/gemini-1.5-flas",
+            model="deepseek/deepseek-r1-0528:free",
             messages=[{"role": "user", "content": prompt}]
         )
 
