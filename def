@@ -3,104 +3,112 @@ def gerar_sigla_sugerida(municipio, site, uf, usados, df_total):
 
     def limpar(palavra):
         palavra = unidecode(palavra.strip().upper())
-        palavra = re.sub(r"[^A-Z]", "", palavra)  # remove tudo que não for letra maiúscula
+        palavra = re.sub(r"[^A-Z]", "", palavra)
         return palavra
 
-    # Limpa e filtra stopwords
     municipio_parts = [limpar(w) for w in municipio.split() if limpar(w) and limpar(w) not in stopwords]
     site_parts = [limpar(w) for w in site.split() if limpar(w) and limpar(w) not in stopwords]
 
-    # Validação: Se município ou site ficaram vazios após limpeza
     if not municipio_parts:
-        municipio_parts = ["XXX"]  # Fallback
+        municipio_parts = ["XXX"]
     if not site_parts:
-        site_parts = ["XXX"]  # Fallback
+        site_parts = ["XXX"]
 
-    # Pega última palavra do município (geralmente a mais significativa)
     m = municipio_parts[-1] if municipio_parts else "X"
     
-    # Se município só tem 1 letra, tenta usar a primeira palavra também
     if len(m) < 2 and len(municipio_parts) > 1:
         m = municipio_parts[0][:2] if len(municipio_parts[0]) >= 2 else municipio_parts[0]
 
-    candidates = []
+    # Função auxiliar para gerar candidatos (usada tanto para 3 letras quanto 2 letras)
+    def gerar_candidatos(municipio_letra, site_palavras, tamanho=3):
+        cands = []
+        
+        if tamanho == 3:
+            # Regras originais para 3 letras
+            if len(site_palavras) >= 3:
+                if all(len(p) >= 1 for p in site_palavras[:3]):
+                    cands.append(site_palavras[0][0] + site_palavras[1][0] + site_palavras[2][0])
+            
+            if len(site_palavras) >= 2:
+                if len(site_palavras[0]) >= 2 and len(site_palavras[1]) >= 1:
+                    cands.append(site_palavras[0][:2] + site_palavras[1][0])
+            
+            if len(municipio_letra) >= 1 and len(site_palavras[0]) >= 2:
+                cands.append(municipio_letra[0] + site_palavras[0][:2])
+            
+            if len(municipio_letra) >= 2 and len(site_palavras[0]) >= 1:
+                cands.append(municipio_letra[:2] + site_palavras[0][0])
+            
+            if len(site_palavras) >= 2 and len(municipio_letra) >= 1:
+                if len(site_palavras[0]) >= 1 and len(site_palavras[1]) >= 1:
+                    cands.append(municipio_letra[0] + site_palavras[0][0] + site_palavras[1][0])
+            
+            if len(site_palavras) >= 2 and len(municipio_letra) >= 1:
+                if len(site_palavras[0]) >= 2 and len(site_palavras[1]) >= 1:
+                    cands.append(municipio_letra[0] + site_palavras[0][1] + site_palavras[1][0])
+            
+            if len(site_palavras) == 1 and len(site_palavras[0]) >= 3:
+                cands.append(site_palavras[0][:3])
+            
+            if len(site_palavras) == 1 and len(municipio_letra) >= 1 and len(site_palavras[0]) >= 2:
+                cands.append(municipio_letra[0] + site_palavras[0][:2])
 
-    # Regra 1: Site com 3+ palavras → 1ª letra de cada
-    if len(site_parts) >= 3:
-        if all(len(p) >= 1 for p in site_parts[:3]):
-            candidates.append(site_parts[0][0] + site_parts[1][0] + site_parts[2][0])
-    
-    # Regra 2: Site com 2 palavras → 2 letras da 1ª + 1 letra da 2ª
-    if len(site_parts) >= 2:
-        if len(site_parts[0]) >= 2 and len(site_parts[1]) >= 1:
-            candidates.append(site_parts[0][:2] + site_parts[1][0])
-    
-    # Regra 3: 1ª letra município + 2 primeiras do site (1ª palavra)
-    if len(m) >= 1 and len(site_parts[0]) >= 2:
-        candidates.append(m[0] + site_parts[0][:2])
-    
-    # Regra 4: 2 primeiras do município + 1ª do site
-    if len(m) >= 2 and len(site_parts[0]) >= 1:
-        candidates.append(m[:2] + site_parts[0][0])
-    
-    # Regra 5: 1ª município + 1ª de cada palavra do site (se tiver 2 palavras)
-    if len(site_parts) >= 2 and len(m) >= 1:
-        if len(site_parts[0]) >= 1 and len(site_parts[1]) >= 1:
-            candidates.append(m[0] + site_parts[0][0] + site_parts[1][0])
-    
-    # Regra 6: 1ª município + 2ª letra 1ª palavra + 1ª da 2ª palavra
-    if len(site_parts) >= 2 and len(m) >= 1:
-        if len(site_parts[0]) >= 2 and len(site_parts[1]) >= 1:
-            candidates.append(m[0] + site_parts[0][1] + site_parts[1][0])
-    
-    # Regra 7: Site com 1 palavra → 3 primeiras letras
-    if len(site_parts) == 1 and len(site_parts[0]) >= 3:
-        candidates.append(site_parts[0][:3])
-    
-    # Regra 8: 1ª município + 1ª e 2ª do site (para sites de 1 palavra)
-    if len(site_parts) == 1 and len(m) >= 1 and len(site_parts[0]) >= 2:
-        candidates.append(m[0] + site_parts[0][:2])
+            # Varredura sequencial 3 letras
+            bloco = municipio_letra + "".join(site_palavras)
+            if len(bloco) >= 3:
+                for i in range(len(bloco) - 2):
+                    cands.append(bloco[i:i+3])
+        
+        elif tamanho == 2:
+            # Regras adaptadas para 2 letras
+            if len(site_palavras) >= 2:
+                cands.append(site_palavras[0][0] + site_palavras[1][0])
+            
+            if len(site_palavras[0]) >= 2:
+                cands.append(site_palavras[0][:2])
+            
+            if len(municipio_letra) >= 1 and len(site_palavras[0]) >= 1:
+                cands.append(municipio_letra[0] + site_palavras[0][0])
+            
+            if len(municipio_letra) >= 2:
+                cands.append(municipio_letra[:2])
+            
+            # Varredura sequencial 2 letras
+            bloco = municipio_letra + "".join(site_palavras)
+            if len(bloco) >= 2:
+                for i in range(len(bloco) - 1):
+                    cands.append(bloco[i:i+2])
+        
+        return cands
 
-    # Regra 9: Varredura monotônica (todas as combinações possíveis)
-    bloco = m + "".join(site_parts)
-    if len(bloco) >= 3:
-        for i in range(len(bloco)):
-            for j in range(i + 1, len(bloco)):
-                for k in range(j + 1, len(bloco)):
-                    candidates.append(bloco[i] + bloco[j] + bloco[k])
-
-    # Normaliza todos os candidatos
+    # Tenta primeiro com 3 letras (sem número)
+    candidates = gerar_candidatos(m, site_parts, tamanho=3)
     candidates = [c.upper() for c in candidates if len(c) == 3]
-
-    # Remove duplicatas mantendo ordem
+    
+    # Remove duplicatas
     seen = set()
     candidates = [x for x in candidates if not (x in seen or seen.add(x))]
 
-    # Checa unicidade contra df_total e já usados
+    # Checa unicidade
     usados_uf = set(df_total.loc[df_total["SIG_ESTADO"] == uf, "SIG_SITE"].unique())
     for cand in candidates:
         if cand not in usados[uf] and cand not in usados_uf:
             usados[uf].add(cand)
             return cand
 
-    # Se nenhuma sigla estiver disponível, gera uma com número incremental
-    if len(site_parts[0]) >= 2:
-        base = (m[0] + site_parts[0][:2]).upper()
-    elif len(site_parts[0]) == 1:
-        base = (m[0] + site_parts[0][0] + "X").upper()
-    else:
-        base = (m[:2] + "X").upper() if len(m) >= 2 else "XXX"
+    # Se não encontrou, tenta com NÚMERO na frente (2 a 9)
+    for numero in range(2, 10):
+        candidates_2letras = gerar_candidatos(m, site_parts, tamanho=2)
+        candidates_2letras = [f"{numero}{c.upper()}" for c in candidates_2letras if len(c) == 2]
+        
+        # Remove duplicatas
+        seen = set()
+        candidates_2letras = [x for x in candidates_2letras if not (x in seen or seen.add(x))]
+        
+        for cand in candidates_2letras:
+            if len(cand) == 3 and cand not in usados[uf] and cand not in usados_uf:
+                usados[uf].add(cand)
+                return cand
     
-    numero = 2
-    tentativas = 0
-    while tentativas < 1000:  # Limite de segurança
-        sigla_numerada = f"{base}{numero}"
-        if len(sigla_numerada) <= 6:  # Garante que não fica muito longa
-            if sigla_numerada not in usados[uf] and sigla_numerada not in usados_uf:
-                usados[uf].add(sigla_numerada)
-                return sigla_numerada
-        numero += 1
-        tentativas += 1
-    
-    # Último recurso
+    # Último recurso (muito improvável chegar aqui)
     return "XXX"
