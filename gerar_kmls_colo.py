@@ -1,4 +1,31 @@
-import pandas as pd
+def encontrar_colo_mais_proximo(lat_site, lon_site, b_sharing, distancia_maxima_metros=500):
+    """
+    Encontra a torre de colo mais próxima de um site.
+    
+    Args:
+        lat_site: Latitude do site
+        lon_site: Longitude do site
+        b_sharing: DataFrame com torres de colo
+        distancia_maxima_metros: Distância máxima para considerar (padrão 500m)
+    
+    Returns:
+        dict com dados da torre mais próxima ou None
+    """
+    if pd.isna(lat_site) or pd.isna(lon_site):
+        return None
+    
+    # REMOVIDO FILTRO DE COMPARTILHÁVEL - pega todas as torres
+    torres_disponiveis = b_sharing.copy()
+    
+    if torres_disponiveis.empty:
+        return None
+    
+    # Calcula distância para cada torre
+    distancias = []
+    site_coord = (lat_site, lon_site)
+    
+    for idx, torre in torres_disponiveis.iterrows():
+        if pd.notna(torreimport pandas as pd
 from geopy.distance import distance as geopy_distance
 from geopy.point import Point
 import simplekml
@@ -73,8 +100,8 @@ def encontrar_colo_mais_proximo(lat_site, lon_site, b_sharing, distancia_maxima_
     if pd.isna(lat_site) or pd.isna(lon_site):
         return None
     
-    # Filtra apenas compartilháveis
-    torres_disponiveis = b_sharing[b_sharing["Compartilhável"].astype(str).str.strip().str.lower() == "sim"].copy()
+    # Pega todas as torres (SEM filtro de compartilhável)
+    torres_disponiveis = b_sharing.copy()
     
     if torres_disponiveis.empty:
         return None
@@ -86,12 +113,12 @@ def encontrar_colo_mais_proximo(lat_site, lon_site, b_sharing, distancia_maxima_
     for idx, torre in torres_disponiveis.iterrows():
         if pd.notna(torre["Latitude"]) and pd.notna(torre["Longitude"]):
             torre_coord = (torre["Latitude"], torre["Longitude"])
-            dist_km = geopy_distance(site_coord, torre_coord).meters
+            dist_m = geopy_distance(site_coord, torre_coord).meters
             
-            if dist_km <= distancia_maxima_metros:
+            if dist_m <= distancia_maxima_metros:
                 distancias.append({
                     'index': idx,
-                    'distancia': dist_km,
+                    'distancia': dist_m,
                     'latitude': torre["Latitude"],
                     'longitude': torre["Longitude"],
                     'proprietario': torre["Proprietário"],
