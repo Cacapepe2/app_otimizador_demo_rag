@@ -1,36 +1,9 @@
-def encontrar_colo_mais_proximo(lat_site, lon_site, b_sharing, distancia_maxima_metros=500):
-    """
-    Encontra a torre de colo mais próxima de um site.
-    
-    Args:
-        lat_site: Latitude do site
-        lon_site: Longitude do site
-        b_sharing: DataFrame com torres de colo
-        distancia_maxima_metros: Distância máxima para considerar (padrão 500m)
-    
-    Returns:
-        dict com dados da torre mais próxima ou None
-    """
-    if pd.isna(lat_site) or pd.isna(lon_site):
-        return None
-    
-    # REMOVIDO FILTRO DE COMPARTILHÁVEL - pega todas as torres
-    torres_disponiveis = b_sharing.copy()
-    
-    if torres_disponiveis.empty:
-        return None
-    
-    # Calcula distância para cada torre
-    distancias = []
-    site_coord = (lat_site, lon_site)
-    
-    for idx, torre in torres_disponiveis.iterrows():
-        if pd.notna(torreimport pandas as pd
+import pandas as pd
+import numpy as np
+import os
 from geopy.distance import distance as geopy_distance
 from geopy.point import Point
 import simplekml
-import os
-import numpy as np
 
 def gerar_circulo_kml(latitude, longitude, raio_metros, nome_arquivo, nome_ponto, proprietario, id_detentora):
     """
@@ -195,7 +168,7 @@ def processar_e_gerar_kmls(df_final, b_sharing, distancia_colo_metros=500):
                 processado = f"Erro: {str(e)}"
                 print(f"❌ Erro ao gerar {nome_kml}: {str(e)}")
         else:
-            processado = "Sem colo disponível"
+            processado = "OK"
         
         # Adiciona à planilha
         dados_planilha.append({
@@ -220,7 +193,8 @@ if __name__ == "__main__":
     # Teste standalone
     try:
         df = pd.read_excel("Gestão_SOI.xlsx")
-        b_sharing = pd.read_excel("BASE_SHARING_FLY_JUL 2025 v2 2.xlsx")
+        b_sharing = pd.read_excel("BASE_SHARING_FLY_JUL 2025 v2 2.xlsx",
+            usecols=["UF", "ID Detentora","Latitude", "Longitude","Altitude", "altura Disponível","Proprietário","Compartilhável"])
         processar_e_gerar_kmls(df, b_sharing)
     except Exception as e:
         print(f"Erro: {e}")
