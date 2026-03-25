@@ -1,0 +1,212 @@
+def _to_int_setor(valor):
+    try:
+        if pd.isna(valor) or valor == "" or valor is None:
+            return 0
+        return int(float(valor))
+    except (ValueError, TypeError):
+        return 0
+
+
+def _split_tokens(valor, sep="/"):
+    if pd.isna(valor) or valor is None:
+        return []
+
+    texto = str(valor).strip()
+    if not texto:
+        return []
+
+    return [t.strip().upper() for t in texto.split(sep) if t and t.strip()]
+
+
+def _normalizar_freq(token):
+    """
+    - remove M do final (Massive MIMO) para comparar a frequência base
+    - 2600P e 2600RS viram 2600
+    """
+    t = str(token).strip().upper()
+
+    if t.endswith("M"):
+        t = t[:-1]
+
+    if t in {"2600P", "2600RS"}:
+        t = "2600"
+
+    return t
+
+
+def _obter_mimos(row):
+    """
+    Separa MIMO normal de Massive MIMO a partir de FINAL_MIMO_4G.
+
+    Exemplo:
+    FINAL_MIMO_4G = "1800/2100M/2600M"
+
+    mimo_normal = {"1800"}
+    massive_mimo = {"2100", "2600"}
+    """
+    tokens = _split_tokens(row.get("FINAL_MIMO_4G"), sep="/")
+
+    mimo_normal = set()
+    massive_mimo = set()
+
+    for token in tokens:
+        token = token.strip().upper()
+
+        if token.endswith("M"):
+            massive_mimo.add(_normalizar_freq(token))
+        else:
+            mimo_normal.add(_normalizar_freq(token))
+
+    return mimo_normal, massive_mimo
+
+
+def _todas_4g_sao_massive(freqs_4g, massive_mimo):
+    return bool(freqs_4g) and set(freqs_4g).issubset(massive_mimo)
+
+
+# =========================================================
+# ANTENAS
+# =========================================================
+def calcular_antenas(row):
+    try:
+        setores = _to_int_setor(row.get("SETOR"))
+        if setores == 0:
+            return 0
+
+        freqs_4g = [_normalizar_freq(t) for t in _split_tokens(row.get("FINAL_FREQUENCIA_4G"), sep="/")]
+        _, massive_mimo = _obter_mimos(row)
+
+        # Se todas as frequências 4G forem Massive MIMO:
+        # antenas = número de setores
+        if _todas_4g_sao_massive(freqs_4g, massive_mimo):
+            return setores
+
+        # Regra antiga de antenas
+        tecnologias = [t.strip().upper() for t in str(row.get("FINAL_TECNOLOGIA_FINAL", "")).split("|") if t.strip()]
+
+        if "5G" in tecnologias:
+            if set(tecnologias) == {"5G"}:
+                return setores
+            else:
+                return setores * 2
+        else:
+            return setores
+
+    except Exception:
+        return 0
+
+
+# =========================================================
+# RRUS
+# =========================================================
+def calcular_rrus(row):
+    try:
+        setores = _to_int_setor(row.get("SETOR"))
+        if setores == 0:
+            return 0
+
+        freq_4g = [_normalizar_freq(t) for t in _split_tokens(row.get("FINAL_FREQUENCIA_4G"), sep="/")]
+        freq_5g = [_normalizar_freq(t) for t in _split_tokens(row.get("FINAL_FREQUENCIA_5G"), sep="/")]
+        tipologia = str(row.get("Tipologia", "")).strip().upper()
+
+        mimo_normal, massive_mimo = _obter_mimos(row)
+
+        # 1) Se 4G vier vazio -> RRUs = setores
+        if not freq_4g:
+            total = setores
+        else:
+            # 2) Se todas as frequências 4G forem Massive MIMO -> 0 RRUs
+            if _todas_4g_sao_massive(freq_4g, massive_mimo):
+                total = 0
+            else:
+                total = 0
+                cont = Counter(freq_4g)
+
+                # =====================================================
+                # 3) 2300 sem Massive MIMO = número de setores, repetido
+                #    2300 com Massive MIMO = 0
+                # =====================================================
+                if cont["2300"] > 0:
+                    if "2300" not in massive_mimo:
+                        total += cont["2300"] * setores
+                    cont["2300"] = 0
+
+                # =====================================================
+                # 4) 1800/2600 = 1 RRU
+                #    Só se nenhum dos dois estiver em Massive MIMO
+                # =====================================================
+                if "1800" not in massive_mimo and "2600" not in massive_mimo:
+                    qtd_combo_1800_2600 = min(cont["1800"], cont["2600"])
+                    total += qtd_combo_1800_2600 * 1
+                    cont["1800"] -= qtd_combo_1800_2600
+                    cont["2600"] -= qtd_combo_1800_2600
+
+                # =====================================================
+                # 5) Regras antigas com MIMO normal
+                #    Ordem importa: primeiro combo maior, depois menores
+                # =====================================================
+
+                # 1800/2100/2600
+                if all(cont[f] > 0 for f in ["1800", "2100", "2600"]):
+                    qtd_combo = min(cont["1800"], cont["2100"], cont["2600"])
+                    if qtd_combo > 0:
+                        rru_sem, rru_com = rru_rules.get(setores, {}).get("1800/2100/2600", (0, 0))
+
+                        if {"1800", "2100", "2600"}.issubset(mimo_normal):
+                            total += qtd_combo * rru_com
+                        else:
+                            total += qtd_combo * rru_sem
+
+                        cont["1800"] -= qtd_combo
+                        cont["2100"] -= qtd_combo
+                        cont["2600"] -= qtd_combo
+
+                # 1800/2100
+                if cont["1800"] > 0 and cont["2100"] > 0:
+                    qtd_combo = min(cont["1800"], cont["2100"])
+                    if qtd_combo > 0:
+                        rru_sem, rru_com = rru_rules.get(setores, {}).get("1800/2100", (0, 0))
+
+                        if {"1800", "2100"}.issubset(mimo_normal):
+                            total += qtd_combo * rru_com
+                        else:
+                            total += qtd_combo * rru_sem
+
+                        cont["1800"] -= qtd_combo
+                        cont["2100"] -= qtd_combo
+
+                # 700
+                if cont["700"] > 0 and "700" not in massive_mimo:
+                    qtd_700 = cont["700"]
+                    rru_sem, rru_com = rru_rules.get(setores, {}).get("700", (0, 0))
+
+                    if "700" in mimo_normal:
+                        total += qtd_700 * rru_com
+                    else:
+                        total += qtd_700 * rru_sem
+
+                    cont["700"] = 0
+
+                # 2600 sozinho (inclui 2600P e 2600RS já normalizados)
+                if cont["2600"] > 0 and "2600" not in massive_mimo:
+                    qtd_2600 = cont["2600"]
+                    rru_sem, rru_com = rru_rules.get(setores, {}).get("2600", (0, 0))
+
+                    if "2600" in mimo_normal:
+                        total += qtd_2600 * rru_com
+                    else:
+                        total += qtd_2600 * rru_sem
+
+                    cont["2600"] = 0
+
+                # 1800 ou 2100 sozinhos continuam sem regra
+                # Massive MIMO em frequência isolada não soma RRUs
+
+        # 6) 3500 vem da FINAL_FREQUENCIA_5G e MICROCELL = +1 RRU
+        if "3500" in freq_5g and tipologia == "MICROCELL":
+            total += 1
+
+        return total
+
+    except Exception:
+        return 0
