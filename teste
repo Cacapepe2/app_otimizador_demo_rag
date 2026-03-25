@@ -210,3 +210,136 @@ def calcular_rrus(row):
 
     except Exception:
         return 0
+
+
+
+def gerar_kmls_e_planilha_carregar(df_out, pasta_destino="Carregar_poligonos"):
+    """
+    Gera KMLs sempre que houver coordenada válida.
+
+    Regras:
+    - se Tipologia for Micro Cell ou Indoor, raio final = 50m;
+    - caso contrário:
+        - raio_base = raio dinâmico calculado por site;
+        - se encontrar colo dentro do raio_base, raio_final = raio_base + 50;
+        - se não encontrar colo, raio_final = raio_base;
+        - se não houver sites na varredura de 1km, raio_base = 500.
+    """
+    os.makedirs(pasta_destino, exist_ok=True)
+
+    dados_planilha = []
+    kmls_gerados = []
+    sites_com_kml = []
+    ids_nao_encontrados = []
+    info_kmls = []
+
+    print("\n" + "=" * 60)
+    print("🔄 INICIANDO GERAÇÃO DE KMLs E PLANILHA")
+    print("=" * 60 + "\n")
+
+    for idx, row in df_out.iterrows():
+        id_master = row["UID_IDMASTER"]
+        sigla_sugerida = row["Sigla Sugerida"]
+        lat_site = pd.to_numeric(row["LATITUDE"], errors="coerce")
+        lon_site = pd.to_numeric(row["LONGITUDE"], errors="coerce")
+        processado_auto = row.get("Processado pela Automação?", "")
+        tipologia = row.get("Tipologia", "")
+
+        if pd.isna(lat_site) or pd.isna(lon_site):
+            continue
+
+        usa_raio_fixo_50 = tipologia_forca_raio_50(tipologia)
+
+        if usa_raio_fixo_50:
+            raio_base = 50
+            colos_texto, colos_info = encontrar_colos(lat_site, lon_site, raio_base)
+            tem_colo = len(colos_info) > 0
+            raio_final = 50
+        else:
+            raio_base = pd.to_numeric(row.get("Raio Dinamico Colo (m)", np.nan), errors="coerce")
+            if pd.isna(raio_base) or raio_base <= 0:
+                raio_base = fallback_raio_sem_vizinhos
+
+            colos_texto, colos_info = encontrar_colos(lat_site, lon_site, raio_base)
+
+            tem_colo = len(colos_info) > 0
+            raio_final = raio_base + acrescimo_raio_quando_tem_colo if tem_colo else raio_base
+
+        nome_kml = f"{sigla_sugerida}.kml"
+        caminho_kml = os.path.join(pasta_destino, nome_kml)
+
+        if tem_colo:
+            proprietarios = sorted(set(str(c["proprietario"]) for c in colos_info))
+            descricao_kml = (
+                f"Tipologia: {tipologia}\n"
+                f"Raio base calculado: {raio_base:.2f}m\n"
+                f"Raio final do polígono: {raio_final:.2f}m\n"
+                f"Colos encontrados: {len(colos_info)}\n"
+                f"Proprietários: {', '.join(proprietarios)}"
+            )
+        else:
+            descricao_kml = (
+                f"Tipologia: {tipologia}\n"
+                f"Raio base calculado: {raio_base:.2f}m\n"
+                f"Raio final do polígono: {raio_final:.2f}m\n"
+                f"Nenhum colo encontrado dentro do polígono"
+            )
+
+        gerar_circulo_kml(
+            latitude=lat_site,
+            longitude=lon_site,
+            raio_metros=raio_final,
+            nome_arquivo=caminho_kml,
+            nome_local=f"Site {sigla_sugerida}",
+            descricao=descricao_kml
+        )
+
+        kmls_gerados.append(nome_kml)
+        sites_com_kml.append(id_master)
+
+        info_kmls.append({
+            "kml": nome_kml,
+            "id_master": id_master,
+            "sigla": sigla_sugerida,
+            "tipologia": tipologia,
+            "raio_base_m": raio_base,
+            "raio_final_m": raio_final,
+            "tem_colo": tem_colo,
+            "num_colos": len(colos_info),
+            "colos": colos_info
+        })
+
+        dados_planilha.append({
+            "IDMASTER": id_master,
+            "UFSIGLA": sigla_sugerida,
+            "Tipologia": tipologia,
+            "Processado pela Automação?": processado_auto,
+            "Raio Dinamico Colo (m)": round(raio_base, 2),
+            "Raio Final KML (m)": round(raio_final, 2),
+            "Tem Colo?": "Sim" if tem_colo else "Não",
+            "Qtd Colos": len(colos_info)
+        })
+
+        print(
+            f"✅ {sigla_sugerida}: KML gerado | "
+            f"Tipologia: {tipologia} | "
+            f"Raio base: {raio_base:.2f}m | "
+            f"Raio final: {raio_final:.2f}m | "
+            f"Colos: {len(colos_info)}"
+        )
+
+    if dados_planilha:
+        df_planilha = pd.DataFrame(dados_planilha)
+        nome_planilha = "Planilha_Carregar_KML.xlsx"
+        df_planilha.to_excel(nome_planilha, index=False)
+
+        print(f"\n{'=' * 60}")
+        print("📊 RESUMO")
+        print(f"{'=' * 60}")
+        print(f"✅ {len(kmls_gerados)} KMLs gerados na pasta '{pasta_destino}'")
+        print(f"✅ Planilha '{nome_planilha}' criada com {len(dados_planilha)} registros")
+
+        return df_planilha, kmls_gerados, sites_com_kml, ids_nao_encontrados, info_kmls
+
+    df_planilha = pd.DataFrame()
+    return df_planilha, [], [], [], []
