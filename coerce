@@ -1,0 +1,21 @@
+import pandas as pd
+
+def decimal_para_gms(valor):
+    if pd.isna(valor):
+        return ""
+
+    sinal = "-" if valor < 0 else ""
+    valor = abs(valor)
+
+    graus = int(valor)
+    minutos_float = (valor - graus) * 60
+    minutos = int(minutos_float)
+    segundos = (minutos_float - minutos) * 60
+
+    return f"{sinal}{graus}° {minutos}' {segundos:.2f}\""
+
+df["latitude"] = pd.to_numeric(df["latitude"], errors="coerce")
+df["longitude"] = pd.to_numeric(df["longitude"], errors="coerce")
+
+df["latitude_gms"] = df["latitude"].apply(decimal_para_gms)
+df["longitude_gms"] = df["longitude"].apply(decimal_para_gms)
