@@ -1,0 +1,31 @@
+df_out["regional"] = df_out["uf"].map(dicionario_regional)
+
+# 1. preenche geral por regional
+df_out["nomeSolicitante"] = df_out["regional"].map(lambda x: dict_solicitante_regional.get(x, {}).get("nome"))
+df_out["nomeDemandante"] = df_out["regional"].map(lambda x: dict_solicitante_regional.get(x, {}).get("nome"))
+df_out["emailDemandante"] = df_out["regional"].map(lambda x: dict_solicitante_regional.get(x, {}).get("email"))
+
+# 2. sobrescreve só RJ e ES
+mask_rj_es = df_out["uf"].isin(["RJ", "ES"])
+
+df_out.loc[mask_rj_es, "nomeSolicitante"] = df_out.loc[mask_rj_es, "uf"].map(
+    lambda x: dict_solicitante_uf.get(x, {}).get("nome")
+)
+df_out.loc[mask_rj_es, "nomeDemandante"] = df_out.loc[mask_rj_es, "uf"].map(
+    lambda x: dict_solicitante_uf.get(x, {}).get("nome")
+)
+df_out.loc[mask_rj_es, "emailDemandante"] = df_out.loc[mask_rj_es, "uf"].map(
+    lambda x: dict_solicitante_uf.get(x, {}).get("email")
+)
+
+# 3. trata SP por DDD
+mask_sp_11_13 = (df_out["uf"] == "SP") & (df_out["ddd"].isin([11, 13]))
+mask_sp_outros = (df_out["uf"] == "SP") & (~df_out["ddd"].isin([11, 13]))
+
+df_out.loc[mask_sp_11_13, "nomeSolicitante"] = "Douglas Martins Pereira"
+df_out.loc[mask_sp_11_13, "nomeDemandante"] = "Douglas Martins Pereira"
+df_out.loc[mask_sp_11_13, "emailDemandante"] = "douglas.pereira@telefonica.com"
+
+df_out.loc[mask_sp_outros, "nomeSolicitante"] = "Alexandre Francisco Pesce"
+df_out.loc[mask_sp_outros, "nomeDemandante"] = "Alexandre Francisco Pesce"
+df_out.loc[mask_sp_outros, "emailDemandante"] = "alexandre.pesce@telefonica.com"
