@@ -1,0 +1,67 @@
+from geopy.distance import geodesic
+
+def gerar_vertices_poligono(latitude, longitude, raio_metros, num_pontos=36):
+    vertices = []
+    centro = (latitude, longitude)
+
+    for i in range(num_pontos + 1):  # repete o primeiro no final
+        angulo = i * (360 / num_pontos)
+        ponto = geodesic(meters=raio_metros).destination(centro, angulo)
+
+        vertices.append({
+            "latitude": float(ponto.latitude),
+            "longitude": float(ponto.longitude)
+        })
+
+    return vertices
+
+
+
+def obter_raio_final_por_idmaster(df_planilha, id_master):
+    linha = df_planilha[df_planilha["IDMASTER"] == id_master]
+
+    if linha.empty:
+        raise ValueError(f"IDMASTER {id_master} não encontrado na planilha de carregar KML.")
+
+    raio_final = pd.to_numeric(linha.iloc[0]["Raio Final KML (m)"], errors="coerce")
+
+    if pd.isna(raio_final) or raio_final <= 0:
+        raise ValueError(f"Raio final inválido para o IDMASTER {id_master}.")
+
+    return float(raio_final)
+
+
+def montar_payload_poligono_api(id_result, registro_df_out, df_planilha):
+    latitude = pd.to_numeric(registro_df_out["LATITUDE"], errors="coerce")
+    longitude = pd.to_numeric(registro_df_out["LONGITUDE"], errors="coerce")
+    id_master = registro_df_out["UID_IDMASTER"]
+
+    if pd.isna(latitude) or pd.isna(longitude):
+        raise ValueError("Latitude/Longitude inválidas no registro do df_out.")
+
+    raio_metros = obter_raio_final_por_idmaster(df_planilha, id_master)
+
+    vertices = gerar_vertices_poligono(latitude, longitude, raio_metros)
+
+    payload = {
+        "id": int(id_result),
+        "desenhoVertices": vertices
+    }
+
+    return payload
+
+
+registro_out = df_out.to_dict(orient="records")[32].copy()
+
+payload_poligono = montar_payload_poligono_api(
+    id_result=id_result,
+    registro_df_out=registro_out,
+    df_planilha=df_planilha
+)
+
+response_poligono = requests.post(
+    url_post_poligono,
+    headers=headers,
+    verify=False,
+    json=payload_poligono
+)
