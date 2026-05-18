@@ -174,61 +174,32 @@ def validar_tabela(
                     )
                 )
 
-    # 4. Schema / colunas esperadas
+    # 4. Schema / colunas esperadas agrupado
     if colunas_esperadas:
-        for coluna in colunas_esperadas:
-            try:
-                query = f"""
-                    SELECT COUNT(*) AS existe
-                    FROM INFORMATION_SCHEMA.COLUMNS
-                    WHERE TABLE_SCHEMA = '{database}'
-                      AND TABLE_NAME = '{tabela}'
-                      AND COLUMN_NAME = '{coluna}'
-                """
+        try:
+            resultado_schema = validar_colunas_esperadas_agrupado(
+                c=c,
+                database=database,
+                tabela=tabela,
+                colunas_esperadas=colunas_esperadas,
+                banco=banco
+            )
 
-                df = c.read_sql(
-                    database=database,
-                    tabela=tabela,
-                    banco=banco,
-                    query=query
+            if resultado_schema:
+                resultados.append(resultado_schema)
+
+        except Exception as e:
+            resultados.append(
+                criar_linha_observabilidade(
+                    banco_origem=database,
+                    tabela_origem=tabela,
+                    regra="Schema - Colunas ausentes",
+                    status_validacao="ERRO",
+                    valor_observado="Erro na execução",
+                    valor_esperado=", ".join(colunas_esperadas),
+                    severidade="Alta",
+                    mensagem=f"Erro ao validar schema da tabela {tabela}: {e}"
                 )
-
-                existe = int(df.loc[0, "existe"])
-
-                if existe > 0:
-                    status = "OK"
-                    severidade = "Baixa"
-                    mensagem = f"A coluna {coluna} existe na tabela {tabela}."
-                else:
-                    status = "ERRO"
-                    severidade = "Alta"
-                    mensagem = f"A coluna {coluna} NÃO existe na tabela {tabela}."
-
-                resultados.append(
-                    criar_linha_observabilidade(
-                        banco_origem=database,
-                        tabela_origem=tabela,
-                        regra=f"Schema - {coluna}",
-                        status_validacao=status,
-                        valor_observado=existe,
-                        valor_esperado="1",
-                        severidade=severidade,
-                        mensagem=mensagem
-                    )
-                )
-
-            except Exception as e:
-                resultados.append(
-                    criar_linha_observabilidade(
-                        banco_origem=database,
-                        tabela_origem=tabela,
-                        regra=f"Schema - {coluna}",
-                        status_validacao="ERRO",
-                        valor_observado="Erro",
-                        valor_esperado="Coluna existente",
-                        severidade="Alta",
-                        mensagem=f"Erro ao validar schema da coluna {coluna}: {e}"
-                    )
-                )
+            )
 
     return resultados
