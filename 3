@@ -1,0 +1,234 @@
+def validar_tabela(
+    c,
+    database,
+    tabela,
+    banco="prod",
+    coluna_data=None,
+    colunas_criticas=None,
+    colunas_esperadas=None
+):
+    resultados = []
+
+    print(f"Validando {database}.{tabela}...")
+
+    # 1. Volume total
+    try:
+        query = f"""
+            SELECT COUNT(*) AS qtd
+            FROM {database}.{tabela}
+        """
+
+        df = c.read_sql(
+            database=database,
+            tabela=tabela,
+            banco=banco,
+            query=query
+        )
+
+        qtd = int(df.loc[0, "qtd"])
+
+        resultados.append(
+            criar_linha_observabilidade(
+                banco_origem=database,
+                tabela_origem=tabela,
+                regra="Volume total",
+                status_validacao="OK",
+                valor_observado=qtd,
+                valor_esperado="Informativo",
+                severidade="Baixa",
+                mensagem=f"A tabela {tabela} possui {qtd:,} registros.".replace(",", ".")
+            )
+        )
+
+    except Exception as e:
+        resultados.append(
+            criar_linha_observabilidade(
+                banco_origem=database,
+                tabela_origem=tabela,
+                regra="Volume total",
+                status_validacao="ERRO",
+                valor_observado="Erro",
+                valor_esperado="Consulta executada",
+                severidade="Alta",
+                mensagem=f"Erro ao validar volume: {e}"
+            )
+        )
+
+    # 2. Freshness / última atualização
+    if coluna_data:
+        try:
+            query = f"""
+                SELECT MAX({coluna_data}) AS ultima_data
+                FROM {database}.{tabela}
+            """
+
+            df = c.read_sql(
+                database=database,
+                tabela=tabela,
+                banco=banco,
+                query=query
+            )
+
+            ultima_data = pd.to_datetime(df.loc[0, "ultima_data"], errors="coerce")
+
+            if pd.isna(ultima_data):
+                status = "ERRO"
+                severidade = "Alta"
+                valor_observado = "Sem data válida"
+                mensagem = f"A coluna {coluna_data} não possui data válida."
+            else:
+                horas = (pd.Timestamp.now() - ultima_data).total_seconds() / 3600
+
+                if horas <= 24:
+                    status = "OK"
+                    severidade = "Baixa"
+                elif horas <= 48:
+                    status = "ALERTA"
+                    severidade = "Média"
+                else:
+                    status = "ERRO"
+                    severidade = "Alta"
+
+                valor_observado = f"{horas:.1f} horas"
+                mensagem = f"Última atualização da tabela {tabela}: {ultima_data}."
+
+            resultados.append(
+                criar_linha_observabilidade(
+                    banco_origem=database,
+                    tabela_origem=tabela,
+                    regra=f"Freshness - {coluna_data}",
+                    status_validacao=status,
+                    valor_observado=valor_observado,
+                    valor_esperado="Até 24 horas",
+                    severidade=severidade,
+                    mensagem=mensagem
+                )
+            )
+
+        except Exception as e:
+            resultados.append(
+                criar_linha_observabilidade(
+                    banco_origem=database,
+                    tabela_origem=tabela,
+                    regra=f"Freshness - {coluna_data}",
+                    status_validacao="ERRO",
+                    valor_observado="Erro",
+                    valor_esperado="Consulta executada",
+                    severidade="Alta",
+                    mensagem=f"Erro ao validar freshness: {e}"
+                )
+            )
+
+    # 3. Nulos em colunas críticas
+    if colunas_criticas:
+        for coluna in colunas_criticas:
+            try:
+                query = f"""
+                    SELECT COUNT(*) AS qtd_nulos
+                    FROM {database}.{tabela}
+                    WHERE {coluna} IS NULL
+                """
+
+                df = c.read_sql(
+                    database=database,
+                    tabela=tabela,
+                    banco=banco,
+                    query=query
+                )
+
+                qtd_nulos = int(df.loc[0, "qtd_nulos"])
+
+                if qtd_nulos == 0:
+                    status = "OK"
+                    severidade = "Baixa"
+                    mensagem = f"A coluna {coluna} não possui nulos."
+                else:
+                    status = "ERRO"
+                    severidade = "Alta"
+                    mensagem = f"A coluna {coluna} possui {qtd_nulos:,} valores nulos.".replace(",", ".")
+
+                resultados.append(
+                    criar_linha_observabilidade(
+                        banco_origem=database,
+                        tabela_origem=tabela,
+                        regra=f"Nulos - {coluna}",
+                        status_validacao=status,
+                        valor_observado=qtd_nulos,
+                        valor_esperado="0 nulos",
+                        severidade=severidade,
+                        mensagem=mensagem
+                    )
+                )
+
+            except Exception as e:
+                resultados.append(
+                    criar_linha_observabilidade(
+                        banco_origem=database,
+                        tabela_origem=tabela,
+                        regra=f"Nulos - {coluna}",
+                        status_validacao="ERRO",
+                        valor_observado="Erro",
+                        valor_esperado="0 nulos",
+                        severidade="Alta",
+                        mensagem=f"Erro ao validar nulos na coluna {coluna}: {e}"
+                    )
+                )
+
+    # 4. Schema / colunas esperadas
+    if colunas_esperadas:
+        for coluna in colunas_esperadas:
+            try:
+                query = f"""
+                    SELECT COUNT(*) AS existe
+                    FROM INFORMATION_SCHEMA.COLUMNS
+                    WHERE TABLE_SCHEMA = '{database}'
+                      AND TABLE_NAME = '{tabela}'
+                      AND COLUMN_NAME = '{coluna}'
+                """
+
+                df = c.read_sql(
+                    database=database,
+                    tabela=tabela,
+                    banco=banco,
+                    query=query
+                )
+
+                existe = int(df.loc[0, "existe"])
+
+                if existe > 0:
+                    status = "OK"
+                    severidade = "Baixa"
+                    mensagem = f"A coluna {coluna} existe na tabela {tabela}."
+                else:
+                    status = "ERRO"
+                    severidade = "Alta"
+                    mensagem = f"A coluna {coluna} NÃO existe na tabela {tabela}."
+
+                resultados.append(
+                    criar_linha_observabilidade(
+                        banco_origem=database,
+                        tabela_origem=tabela,
+                        regra=f"Schema - {coluna}",
+                        status_validacao=status,
+                        valor_observado=existe,
+                        valor_esperado="1",
+                        severidade=severidade,
+                        mensagem=mensagem
+                    )
+                )
+
+            except Exception as e:
+                resultados.append(
+                    criar_linha_observabilidade(
+                        banco_origem=database,
+                        tabela_origem=tabela,
+                        regra=f"Schema - {coluna}",
+                        status_validacao="ERRO",
+                        valor_observado="Erro",
+                        valor_esperado="Coluna existente",
+                        severidade="Alta",
+                        mensagem=f"Erro ao validar schema da coluna {coluna}: {e}"
+                    )
+                )
+
+    return resultados
