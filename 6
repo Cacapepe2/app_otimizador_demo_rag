@@ -1,0 +1,58 @@
+def validar_colunas_esperadas_agrupado(
+    c,
+    database,
+    tabela,
+    colunas_esperadas,
+    banco="prod"
+):
+    """
+    Valida se todas as colunas esperadas existem na tabela.
+    Grava apenas uma linha no resultado, listando as colunas ausentes.
+    """
+
+    if not colunas_esperadas:
+        return None
+
+    colunas_formatadas = "', '".join(colunas_esperadas)
+
+    query = f"""
+        SELECT COLUMN_NAME
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = '{database}'
+          AND TABLE_NAME = '{tabela}'
+          AND COLUMN_NAME IN ('{colunas_formatadas}')
+    """
+
+    df_colunas = c.read_sql(
+        database=database,
+        tabela=tabela,
+        banco=banco,
+        query=query
+    )
+
+    colunas_existentes = set(df_colunas["COLUMN_NAME"].tolist())
+    colunas_esperadas_set = set(colunas_esperadas)
+
+    colunas_ausentes = sorted(list(colunas_esperadas_set - colunas_existentes))
+
+    if len(colunas_ausentes) == 0:
+        status = "OK"
+        severidade = "Baixa"
+        valor_observado = "0 colunas ausentes"
+        mensagem = f"Todas as colunas esperadas existem na tabela {tabela}."
+    else:
+        status = "ERRO"
+        severidade = "Alta"
+        valor_observado = ", ".join(colunas_ausentes)
+        mensagem = f"Colunas ausentes na tabela {tabela}: {', '.join(colunas_ausentes)}."
+
+    return criar_linha_observabilidade(
+        banco_origem=database,
+        tabela_origem=tabela,
+        regra="Schema - Colunas ausentes",
+        status_validacao=status,
+        valor_observado=valor_observado,
+        valor_esperado=", ".join(colunas_esperadas),
+        severidade=severidade,
+        mensagem=mensagem
+    )
