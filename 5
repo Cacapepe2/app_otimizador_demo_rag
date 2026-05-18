@@ -1,0 +1,16 @@
+todos_resultados = []
+
+for config in config_tabelas:
+    resultados = validar_tabela(
+        c=c,
+        database=config["database"],
+        tabela=config["tabela"],
+        banco="prod",
+        coluna_data=config["coluna_data"],
+        colunas_criticas=config["colunas_criticas"],
+        colunas_esperadas=config["colunas_esperadas"]
+    )
+
+    todos_resultados.extend(resultados)
+
+gravar_resultados(c, todos_resultados, banco="prod")
