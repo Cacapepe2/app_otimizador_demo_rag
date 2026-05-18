@@ -1,0 +1,44 @@
+import pandas as pd
+import datetime as dt
+
+
+def criar_linha_observabilidade(
+    banco_origem,
+    tabela_origem,
+    regra,
+    status_validacao,
+    valor_observado,
+    valor_esperado,
+    severidade,
+    mensagem,
+    responsavel="Inteligência Rollout"
+):
+    return {
+        "data_execucao": dt.datetime.now(),
+        "banco_origem": banco_origem,
+        "tabela_origem": tabela_origem,
+        "regra": regra,
+        "status_validacao": status_validacao,
+        "valor_observado": str(valor_observado),
+        "valor_esperado": str(valor_esperado),
+        "severidade": severidade,
+        "mensagem": mensagem,
+        "responsavel": responsavel
+    }
+
+
+def gravar_resultados(c, resultados, banco="prod"):
+    df_resultados = pd.DataFrame(resultados)
+
+    if df_resultados.empty:
+        print("Nenhum resultado para gravar.")
+        return
+
+    c.to_sql(
+        df_resultados,
+        database="controle_gestao",
+        tabela="controle_observabilidade_bases",
+        banco=banco
+    )
+
+    print(f"{len(df_resultados)} validações gravadas com sucesso.")
