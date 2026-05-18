@@ -1,0 +1,13 @@
+CREATE TABLE IF NOT EXISTS controle_gestao.controle_observabilidade_bases (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    data_execucao DATETIME,
+    banco_origem VARCHAR(100),
+    tabela_origem VARCHAR(100),
+    regra VARCHAR(100),
+    status_validacao VARCHAR(20),
+    valor_observado VARCHAR(255),
+    valor_esperado VARCHAR(255),
+    severidade VARCHAR(20),
+    mensagem TEXT,
+    responsavel VARCHAR(100)
+);
