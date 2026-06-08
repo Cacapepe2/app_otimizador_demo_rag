@@ -1,0 +1,20 @@
+modelo_debug = "Móvel - WR Pendentes"
+
+df_refresh_raw, erro_historico = buscar_historico_refresh(modelo_debug)
+
+print("Erro histórico:", erro_historico)
+print("Colunas:")
+print(df_refresh_raw.columns.tolist())
+
+display(df_refresh_raw)
+
+print("\nTipos por coluna e amostras:")
+
+for col in df_refresh_raw.columns:
+    print("\n" + "=" * 80)
+    print("Coluna:", col)
+
+    for i, valor in enumerate(df_refresh_raw[col].head(3)):
+        print(f"Linha {i}")
+        print("Tipo:", type(valor))
+        print("Valor:", repr(valor))
