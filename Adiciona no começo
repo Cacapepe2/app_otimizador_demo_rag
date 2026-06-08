@@ -1,0 +1,38 @@
+import re
+import unicodedata
+
+def limpar_nome_coluna(nome):
+    """
+    Converte nomes de colunas para formato aceito no Lakehouse/Delta.
+    Exemplo:
+    'Request Id' -> 'request_id'
+    'Service Exception Json' -> 'service_exception_json'
+    """
+    nome = str(nome)
+
+    # Remove acentos
+    nome = unicodedata.normalize("NFKD", nome)
+    nome = "".join([c for c in nome if not unicodedata.combining(c)])
+
+    # Minúsculo
+    nome = nome.lower()
+
+    # Troca qualquer coisa que não seja letra/número por _
+    nome = re.sub(r"[^a-zA-Z0-9_]", "_", nome)
+
+    # Remove underscores repetidos
+    nome = re.sub(r"_+", "_", nome)
+
+    # Remove _ no começo/fim
+    nome = nome.strip("_")
+
+    return nome
+
+
+def limpar_colunas_lakehouse(df):
+    """
+    Aplica nomes compatíveis com Lakehouse/Delta.
+    """
+    df = df.copy()
+    df.columns = [limpar_nome_coluna(c) for c in df.columns]
+    return df
