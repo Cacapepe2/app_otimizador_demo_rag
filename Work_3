@@ -1,35 +1,38 @@
-# =========================
-# PEGAR ÚLTIMA ATUALIZAÇÃO
-# =========================
+import pandas as pd
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
-# Tenta pegar só refreshes finalizados, ou seja, com Fim_BRT preenchido
-if "Fim_BRT" in df_tratado.columns:
-    df_finalizados = df_tratado[df_tratado["Fim_BRT"].notna()].copy()
+# Pega somente atualizações finalizadas com sucesso
+df_sucesso = df_tratado[
+    (df_tratado["Status"].astype(str).str.lower() == "completed") &
+    (df_tratado["Fim_BRT"].notna())
+].copy()
+
+df_sucesso = df_sucesso.sort_values("Fim_BRT", ascending=False)
+
+if df_sucesso.empty:
+    print("Nenhuma atualização com sucesso encontrada.")
 else:
-    df_finalizados = df_tratado.copy()
+    ultima = df_sucesso.iloc[0]
 
-if df_finalizados.empty:
-    print("Não encontrei refresh finalizado para esse modelo.")
-else:
-    ultima = df_finalizados.iloc[0]
+    df_saida = pd.DataFrame([{
+        "data_coleta": datetime.now(ZoneInfo("America/Sao_Paulo")).strftime("%Y-%m-%d %H:%M:%S"),
+        "modelo": modelo,
+        "inicio_ultima_atualizacao": ultima["Inicio_BRT_Texto"],
+        "fim_ultima_atualizacao": ultima["Fim_BRT_Texto"],
+        "duracao_minutos": float(ultima["Duracao_Minutos"]),
+        "tipo_refresh": ultima.get("Refresh Type"),
+        "status": ultima.get("Status"),
+        "request_id": ultima.get("Request Id")
+    }])
 
-    print("Última atualização do modelo:")
-    print(f"Modelo: {modelo}")
+    display(df_saida)
 
-    if "Inicio_BRT_Texto" in ultima:
-        print(f"Início: {ultima['Inicio_BRT_Texto']}")
+    spark_df = spark.createDataFrame(df_saida)
 
-    if "Fim_BRT_Texto" in ultima:
-        print(f"Fim: {ultima['Fim_BRT_Texto']}")
+    spark_df.write \
+        .format("delta") \
+        .mode("overwrite") \
+        .saveAsTable("bi_refresh_ultima_atualizacao")
 
-    if "Duracao_Minutos" in ultima and pd.notna(ultima["Duracao_Minutos"]):
-        print(f"Duração: {ultima['Duracao_Minutos']:.2f} minutos")
-
-    if "Refresh Type" in ultima:
-        print(f"Tipo: {ultima['Refresh Type']}")
-
-    if "Status" in ultima:
-        print(f"Status: {ultima['Status']}")
-
-    if "Request Id" in ultima:
-        print(f"Request ID: {ultima['Request Id']}")
+    print("Tabela gravada no Lakehouse: bi_refresh_ultima_atualizacao")
