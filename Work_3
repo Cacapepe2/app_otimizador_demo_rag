@@ -1,0 +1,35 @@
+# =========================
+# PEGAR ÚLTIMA ATUALIZAÇÃO
+# =========================
+
+# Tenta pegar só refreshes finalizados, ou seja, com Fim_BRT preenchido
+if "Fim_BRT" in df_tratado.columns:
+    df_finalizados = df_tratado[df_tratado["Fim_BRT"].notna()].copy()
+else:
+    df_finalizados = df_tratado.copy()
+
+if df_finalizados.empty:
+    print("Não encontrei refresh finalizado para esse modelo.")
+else:
+    ultima = df_finalizados.iloc[0]
+
+    print("Última atualização do modelo:")
+    print(f"Modelo: {modelo}")
+
+    if "Inicio_BRT_Texto" in ultima:
+        print(f"Início: {ultima['Inicio_BRT_Texto']}")
+
+    if "Fim_BRT_Texto" in ultima:
+        print(f"Fim: {ultima['Fim_BRT_Texto']}")
+
+    if "Duracao_Minutos" in ultima and pd.notna(ultima["Duracao_Minutos"]):
+        print(f"Duração: {ultima['Duracao_Minutos']:.2f} minutos")
+
+    if "Refresh Type" in ultima:
+        print(f"Tipo: {ultima['Refresh Type']}")
+
+    if "Status" in ultima:
+        print(f"Status: {ultima['Status']}")
+
+    if "Request Id" in ultima:
+        print(f"Request ID: {ultima['Request Id']}")
