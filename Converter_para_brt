@@ -1,0 +1,48 @@
+def converter_para_brt(valor):
+    """
+    Converte:
+    - timestamp em milissegundos
+    - timestamp em segundos
+    - datetime/string UTC
+    - lista/array com um ou mais valores, pegando o primeiro valor válido
+    """
+    if eh_nulo(valor):
+        return pd.NaT
+
+    # Se vier lista/array/tupla, tenta pegar o primeiro valor útil
+    if isinstance(valor, (list, tuple)):
+        if len(valor) == 0:
+            return pd.NaT
+        valor = valor[0]
+
+    # Se vier numpy array ou pandas array
+    if hasattr(valor, "__len__") and not isinstance(valor, (str, bytes)):
+
+        try:
+            if len(valor) > 0:
+                valor = list(valor)[0]
+            else:
+                return pd.NaT
+        except Exception:
+            pass
+
+    valor_str = str(valor).strip()
+
+    try:
+        if valor_str.replace(".", "", 1).isdigit():
+            valor_num = float(valor_str)
+
+            if valor_num > 10**11:
+                dt = pd.to_datetime(valor_num, unit="ms", utc=True)
+            else:
+                dt = pd.to_datetime(valor_num, unit="s", utc=True)
+        else:
+            dt = pd.to_datetime(valor_str, utc=True, errors="coerce")
+
+        if pd.isna(dt):
+            return pd.NaT
+
+        return dt.tz_convert("America/Sao_Paulo").tz_localize(None)
+
+    except Exception:
+        return pd.NaT
