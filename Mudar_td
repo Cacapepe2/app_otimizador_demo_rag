@@ -1,0 +1,145 @@
+import re
+import json
+import unicodedata
+import pandas as pd
+
+
+def limpar_nome_coluna(nome):
+    """
+    Converte nomes de colunas para formato aceito no Lakehouse/Delta.
+    Exemplo:
+    'Request Id' -> 'request_id'
+    'Service Exception Json' -> 'service_exception_json'
+    """
+    nome = str(nome)
+
+    nome = unicodedata.normalize("NFKD", nome)
+    nome = "".join([c for c in nome if not unicodedata.combining(c)])
+
+    nome = nome.lower()
+    nome = re.sub(r"[^a-zA-Z0-9_]", "_", nome)
+    nome = re.sub(r"_+", "_", nome)
+    nome = nome.strip("_")
+
+    return nome
+
+
+def limpar_colunas_lakehouse(df):
+    """
+    Aplica nomes compatíveis com Lakehouse/Delta.
+    """
+    df = df.copy()
+    df.columns = [limpar_nome_coluna(c) for c in df.columns]
+    return df
+
+
+def valor_para_json_ou_texto(valor):
+    """
+    Converte listas, dicionários e arrays para texto JSON.
+    Evita erro de tipo complexo no Delta.
+    """
+    if valor is None:
+        return None
+
+    try:
+        if pd.isna(valor):
+            return None
+    except Exception:
+        pass
+
+    if isinstance(valor, (list, tuple, dict, set)):
+        try:
+            return json.dumps(valor, ensure_ascii=False, default=str)
+        except Exception:
+            return str(valor)
+
+    if hasattr(valor, "tolist") and not isinstance(valor, (str, bytes)):
+        try:
+            return json.dumps(valor.tolist(), ensure_ascii=False, default=str)
+        except Exception:
+            return str(valor)
+
+    return valor
+
+
+def preparar_dataframe_para_lakehouse(df):
+    """
+    Prepara DataFrame para gravação Delta:
+    - limpa nomes de colunas;
+    - transforma listas/dicts/arrays em JSON string;
+    - evita colunas complexas com NullType.
+    """
+    df = limpar_colunas_lakehouse(df)
+
+    for col in df.columns:
+        # Se a coluna tiver qualquer valor complexo, transforma a coluna toda em texto/JSON
+        tem_complexo = df[col].apply(
+            lambda x: isinstance(x, (list, tuple, dict, set)) or (
+                hasattr(x, "tolist") and not isinstance(x, (str, bytes))
+            )
+        ).any()
+
+        if tem_complexo:
+            df[col] = df[col].apply(valor_para_json_ou_texto).astype("string")
+
+        # Se for object genérico, deixa mais seguro para Spark inferir schema
+        elif df[col].dtype == "object":
+            df[col] = df[col].apply(valor_para_json_ou_texto)
+
+    return df
+
+
+def salvar_overwrite(df_pd, nome_tabela):
+    if df_pd.empty:
+        print(f"Nenhum dado para gravar em {nome_tabela}.")
+        return
+
+    df_pd = preparar_dataframe_para_lakehouse(df_pd)
+
+    spark_df = spark.createDataFrame(df_pd)
+
+    spark_df.write \
+        .format("delta") \
+        .mode("overwrite") \
+        .option("overwriteSchema", "true") \
+        .saveAsTable(nome_tabela)
+
+    print(f"Tabela gravada com overwrite: {nome_tabela}")
+
+
+def salvar_historico_sem_duplicar(df_novo, nome_tabela):
+    if df_novo.empty:
+        print(f"Nenhum histórico novo para gravar em {nome_tabela}.")
+        return
+
+    df_novo = preparar_dataframe_para_lakehouse(df_novo)
+
+    try:
+        df_existente = spark.table(nome_tabela).toPandas()
+        df_existente = preparar_dataframe_para_lakehouse(df_existente)
+        print(f"Histórico existente encontrado: {len(df_existente)} linhas.")
+    except Exception:
+        df_existente = pd.DataFrame()
+        print("Histórico existente não encontrado. Criando tabela nova.")
+
+    df_total = pd.concat([df_existente, df_novo], ignore_index=True)
+
+    # Evita duplicidade usando dataset_id + request_id
+    if "dataset_id" in df_total.columns and "request_id" in df_total.columns:
+        df_total = df_total.sort_values("data_coleta", ascending=False)
+        df_total = df_total.drop_duplicates(
+            subset=["dataset_id", "request_id"],
+            keep="first"
+        )
+
+    df_total = preparar_dataframe_para_lakehouse(df_total)
+
+    spark_df = spark.createDataFrame(df_total)
+
+    spark_df.write \
+        .format("delta") \
+        .mode("overwrite") \
+        .option("overwriteSchema", "true") \
+        .saveAsTable(nome_tabela)
+
+    print(f"Tabela histórica atualizada sem duplicar request_id: {nome_tabela}")
