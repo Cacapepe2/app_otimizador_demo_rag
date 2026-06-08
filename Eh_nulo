@@ -1,0 +1,38 @@
+def eh_nulo(valor):
+    """
+    Verifica nulo de forma segura, inclusive para listas, arrays e dicionários.
+    """
+    if valor is None:
+        return True
+
+    # Listas, arrays, tuplas e dicionários não devem entrar direto no pd.isna
+    if isinstance(valor, (list, tuple, dict)):
+        return len(valor) == 0
+
+    try:
+        resultado = pd.isna(valor)
+
+        # Se pd.isna retornar array/lista, evita erro de ambiguidade
+        if hasattr(resultado, "any"):
+            return resultado.all()
+
+        return bool(resultado)
+
+    except Exception:
+        return False
+
+
+def texto_seguro(valor):
+    """
+    Converte qualquer coisa em texto sem quebrar com array/list/dict.
+    """
+    if eh_nulo(valor):
+        return ""
+
+    if isinstance(valor, (list, tuple, dict)):
+        try:
+            return json.dumps(valor, ensure_ascii=False)
+        except Exception:
+            return str(valor)
+
+    return str(valor)
