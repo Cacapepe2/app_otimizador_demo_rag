@@ -1,32 +1,15 @@
-# =========================
-# TRATAR HORÁRIOS
-# =========================
+df_finalizados = df_tratado[df_tratado["Fim_BRT"].notna()].copy()
 
-df_tratado = df_refresh.copy()
+if df_finalizados.empty:
+    print("Não encontrei atualização finalizada.")
+else:
+    ultima = df_finalizados.iloc[0]
 
-# Converte Start Time
-if "Start Time" in df_tratado.columns:
-    df_tratado["Inicio_BRT"] = converter_timestamp_ms_para_brt(df_tratado["Start Time"])
-
-# Converte End Time
-if "End Time" in df_tratado.columns:
-    df_tratado["Fim_BRT"] = converter_timestamp_ms_para_brt(df_tratado["End Time"])
-
-# Cria colunas em formato texto bonito
-if "Inicio_BRT" in df_tratado.columns:
-    df_tratado["Inicio_BRT_Texto"] = df_tratado["Inicio_BRT"].dt.strftime("%d/%m/%Y %H:%M:%S")
-
-if "Fim_BRT" in df_tratado.columns:
-    df_tratado["Fim_BRT_Texto"] = df_tratado["Fim_BRT"].dt.strftime("%d/%m/%Y %H:%M:%S")
-
-# Calcula duração em minutos
-if "Inicio_BRT" in df_tratado.columns and "Fim_BRT" in df_tratado.columns:
-    df_tratado["Duracao_Minutos"] = (
-        df_tratado["Fim_BRT"] - df_tratado["Inicio_BRT"]
-    ).dt.total_seconds() / 60
-
-# Organiza do mais recente para o mais antigo
-if "Fim_BRT" in df_tratado.columns:
-    df_tratado = df_tratado.sort_values("Fim_BRT", ascending=False)
-
-display(df_tratado)
+    print("Última atualização do modelo:")
+    print(f"Modelo: {modelo}")
+    print(f"Início: {ultima['Inicio_BRT_Texto']}")
+    print(f"Fim: {ultima['Fim_BRT_Texto']}")
+    print(f"Duração: {ultima['Duracao_Minutos']:.2f} minutos")
+    print(f"Tipo: {ultima.get('Refresh Type')}")
+    print(f"Status: {ultima.get('Status')}")
+    print(f"Request ID: {ultima.get('Request Id')}")
