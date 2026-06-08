@@ -1,0 +1,52 @@
+# =========================
+# ACOMPANHAR STATUS DO REFRESH
+# =========================
+
+tempo_maximo_minutos = 60
+intervalo_segundos = 30
+
+inicio_monitoramento = time.time()
+
+while True:
+    if workspace:
+        df_status = fabric.list_refresh_requests(
+            dataset=modelo,
+            workspace=workspace,
+            top_n=10
+        )
+    else:
+        df_status = fabric.list_refresh_requests(
+            dataset=modelo,
+            top_n=10
+        )
+
+    df_status = df_status.copy()
+    df_status.columns = [str(c).strip() for c in df_status.columns]
+
+    # Filtra pelo Request ID retornado pelo refresh
+    df_req = df_status[
+        df_status["Request Id"].astype(str).str.lower() == str(request_id).lower()
+    ].copy()
+
+    if df_req.empty:
+        print("Ainda não encontrei o refresh no histórico. Aguardando...")
+    else:
+        linha = df_req.iloc[0]
+        status = linha.get("Status")
+        refresh_type = linha.get("Refresh Type")
+
+        print("Status atual:", status)
+        print("Tipo:", refresh_type)
+        display(df_req)
+
+        if str(status).lower() in ["completed", "failed", "cancelled", "disabled"]:
+            print("Refresh finalizado.")
+            break
+
+    tempo_decorrido = (time.time() - inicio_monitoramento) / 60
+
+    if tempo_decorrido > tempo_maximo_minutos:
+        print("Tempo máximo de monitoramento atingido.")
+        break
+
+    time.sleep(intervalo_segundos)
