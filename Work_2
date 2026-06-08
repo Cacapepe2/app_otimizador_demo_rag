@@ -1,11 +1,150 @@
+import pandas as pd
+import sempy.fabric as fabric
+
+# ============================================================
+# CONFIGURAÇÕES
+# ============================================================
+
+# Nome exato do modelo semântico
+modelo = "Móvel - Licenciamento Anatel"
+
+# Se o notebook estiver no mesmo workspace do modelo, deixe None
+workspace = None
+
+# Se precisar especificar o workspace, use assim:
+# workspace = "NOME_EXATO_DO_WORKSPACE"
+
+# Quantas atualizações buscar
+top_n = 10
+
+
+# ============================================================
+# BUSCAR HISTÓRICO DE REFRESH
+# ============================================================
+
+if workspace:
+    df_refresh = fabric.list_refresh_requests(
+        dataset=modelo,
+        workspace=workspace,
+        top_n=top_n
+    )
+else:
+    df_refresh = fabric.list_refresh_requests(
+        dataset=modelo,
+        top_n=top_n
+    )
+
+df_refresh = df_refresh.copy()
+df_refresh.columns = [str(c).strip() for c in df_refresh.columns]
+
+print("Colunas encontradas:")
+print(df_refresh.columns.tolist())
+
+print("\nHistórico bruto:")
+display(df_refresh)
+
+
+# ============================================================
+# FUNÇÃO ROBUSTA PARA CONVERTER HORÁRIO
+# ============================================================
+
+def converter_para_brt(valor):
+    """
+    Converte tanto:
+    - timestamp em milissegundos: 1780923604083
+    - datetime/string UTC: 2026-06-08 13:00:04.083000+00:00
+    
+    Para horário de Brasília.
+    """
+    if pd.isna(valor):
+        return pd.NaT
+
+    valor_str = str(valor).strip()
+
+    try:
+        # Caso venha como número/timestamp
+        if valor_str.replace(".", "", 1).isdigit():
+            valor_num = float(valor_str)
+
+            # Timestamp em milissegundos normalmente tem 13 dígitos
+            if valor_num > 10**11:
+                dt = pd.to_datetime(valor_num, unit="ms", utc=True)
+            else:
+                dt = pd.to_datetime(valor_num, unit="s", utc=True)
+
+        # Caso já venha como data
+        else:
+            dt = pd.to_datetime(valor_str, utc=True, errors="coerce")
+
+        if pd.isna(dt):
+            return pd.NaT
+
+        return dt.tz_convert("America/Sao_Paulo")
+
+    except Exception as e:
+        print(f"Erro ao converter valor: {valor} | Erro: {e}")
+        return pd.NaT
+
+
+# ============================================================
+# TRATAR HORÁRIOS
+# ============================================================
+
+df_tratado = df_refresh.copy()
+
+df_tratado["Inicio_BRT"] = df_tratado["Start Time"].apply(converter_para_brt)
+df_tratado["Fim_BRT"] = df_tratado["End Time"].apply(converter_para_brt)
+
+df_tratado["Inicio_BRT_Texto"] = df_tratado["Inicio_BRT"].dt.strftime("%d/%m/%Y %H:%M:%S")
+df_tratado["Fim_BRT_Texto"] = df_tratado["Fim_BRT"].dt.strftime("%d/%m/%Y %H:%M:%S")
+
+df_tratado["Duracao_Minutos"] = (
+    df_tratado["Fim_BRT"] - df_tratado["Inicio_BRT"]
+).dt.total_seconds() / 60
+
+df_tratado = df_tratado.sort_values("Fim_BRT", ascending=False)
+
+print("\nHistórico tratado:")
+display(df_tratado)
+
+
+# ============================================================
+# VISÃO LIMPA
+# ============================================================
+
+colunas_desejadas = [
+    "Id",
+    "Request Id",
+    "Inicio_BRT_Texto",
+    "Fim_BRT_Texto",
+    "Duracao_Minutos",
+    "Refresh Type",
+    "Status",
+    "Service Exception Json",
+    "Extended Status"
+]
+
+colunas_existentes = [
+    col for col in colunas_desejadas
+    if col in df_tratado.columns
+]
+
+print("\nVisão limpa:")
+display(df_tratado[colunas_existentes])
+
+
+# ============================================================
+# ÚLTIMA ATUALIZAÇÃO FINALIZADA
+# ============================================================
+
 df_finalizados = df_tratado[df_tratado["Fim_BRT"].notna()].copy()
 
 if df_finalizados.empty:
-    print("Não encontrei atualização finalizada.")
+    print("\nNão encontrei atualização finalizada.")
 else:
     ultima = df_finalizados.iloc[0]
 
-    print("Última atualização do modelo:")
+    print("\nÚltima atualização do modelo:")
     print(f"Modelo: {modelo}")
     print(f"Início: {ultima['Inicio_BRT_Texto']}")
     print(f"Fim: {ultima['Fim_BRT_Texto']}")
@@ -13,3 +152,28 @@ else:
     print(f"Tipo: {ultima.get('Refresh Type')}")
     print(f"Status: {ultima.get('Status')}")
     print(f"Request ID: {ultima.get('Request Id')}")
+
+
+# ============================================================
+# ÚLTIMA ATUALIZAÇÃO AGENDADA
+# ============================================================
+
+if "Refresh Type" in df_tratado.columns:
+    df_agendado = df_tratado[
+        df_tratado["Refresh Type"].astype(str).str.lower().eq("scheduled")
+    ].copy()
+
+    if df_agendado.empty:
+        print("\nNão encontrei atualização agendada nesse histórico.")
+    else:
+        ultima_agendada = df_agendado.iloc[0]
+
+        print("\nÚltima atualização agendada:")
+        print(f"Modelo: {modelo}")
+        print(f"Início: {ultima_agendada['Inicio_BRT_Texto']}")
+        print(f"Fim: {ultima_agendada['Fim_BRT_Texto']}")
+        print(f"Duração: {ultima_agendada['Duracao_Minutos']:.2f} minutos")
+        print(f"Status: {ultima_agendada.get('Status')}")
+        print(f"Request ID: {ultima_agendada.get('Request Id')}")
+else:
+    print("\nA coluna 'Refresh Type' não apareceu no resultado.")
