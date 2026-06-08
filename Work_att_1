@@ -1,0 +1,40 @@
+import time
+import pandas as pd
+import sempy.fabric as fabric
+
+# =========================
+# CONFIGURAÇÕES
+# =========================
+
+modelo = "Móvel - Licenciamento Anatel"
+workspace = None
+# workspace = "NOME_DO_WORKSPACE"
+
+# Segurança para não disparar sem querer
+executar_refresh = True
+
+
+# =========================
+# DISPARAR REFRESH
+# =========================
+
+if executar_refresh:
+    if workspace:
+        request_id = fabric.refresh_dataset(
+            dataset=modelo,
+            workspace=workspace,
+            refresh_type="automatic",
+            verbose=1
+        )
+    else:
+        request_id = fabric.refresh_dataset(
+            dataset=modelo,
+            refresh_type="automatic",
+            verbose=1
+        )
+
+    print("Refresh disparado.")
+    print("Modelo:", modelo)
+    print("Request ID:", request_id)
+else:
+    print("Refresh não foi disparado. Altere executar_refresh para True.")
