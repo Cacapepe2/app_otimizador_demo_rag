@@ -1,0 +1,52 @@
+def salvar_overwrite(df_pd, nome_tabela):
+    if df_pd.empty:
+        print(f"Nenhum dado para gravar em {nome_tabela}.")
+        return
+
+    df_pd = limpar_colunas_lakehouse(df_pd)
+
+    spark_df = spark.createDataFrame(df_pd)
+
+    spark_df.write \
+        .format("delta") \
+        .mode("overwrite") \
+        .option("overwriteSchema", "true") \
+        .saveAsTable(nome_tabela)
+
+    print(f"Tabela gravada com overwrite: {nome_tabela}")
+
+
+def salvar_historico_sem_duplicar(df_novo, nome_tabela):
+    if df_novo.empty:
+        print(f"Nenhum histórico novo para gravar em {nome_tabela}.")
+        return
+
+    df_novo = limpar_colunas_lakehouse(df_novo)
+
+    try:
+        df_existente = spark.table(nome_tabela).toPandas()
+        df_existente = limpar_colunas_lakehouse(df_existente)
+        print(f"Histórico existente encontrado: {len(df_existente)} linhas.")
+    except Exception:
+        df_existente = pd.DataFrame()
+        print("Histórico existente não encontrado. Criando tabela nova.")
+
+    df_total = pd.concat([df_existente, df_novo], ignore_index=True)
+
+    # Evita duplicidade usando dataset_id + request_id
+    if "dataset_id" in df_total.columns and "request_id" in df_total.columns:
+        df_total = df_total.sort_values("data_coleta", ascending=False)
+        df_total = df_total.drop_duplicates(
+            subset=["dataset_id", "request_id"],
+            keep="first"
+        )
+
+    spark_df = spark.createDataFrame(df_total)
+
+    spark_df.write \
+        .format("delta") \
+        .mode("overwrite") \
+        .option("overwriteSchema", "true") \
+        .saveAsTable(nome_tabela)
+
+    print(f"Tabela histórica atualizada sem duplicar request_id: {nome_tabela}")
