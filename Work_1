@@ -1,0 +1,81 @@
+import pandas as pd
+import sempy.fabric as fabric
+
+# =========================
+# CONFIGURAÇÕES
+# =========================
+
+# Coloque o nome exato do modelo semântico
+modelo = "Móvel - Licenciamento Anatel"
+
+# Se o notebook estiver no mesmo workspace do modelo, pode deixar None
+# Se quiser especificar, coloque o nome exato do workspace
+workspace = None
+# workspace = "NOME_DO_WORKSPACE"
+
+# Quantas atualizações buscar
+top_n = 20
+
+
+# =========================
+# FUNÇÕES AUXILIARES
+# =========================
+
+def converter_timestamp_ms_para_brt(serie):
+    """
+    Converte timestamp em milissegundos para horário de Brasília.
+    Se já vier como data, tenta converter também.
+    """
+    serie_num = pd.to_numeric(serie, errors="coerce")
+
+    if serie_num.notna().any():
+        return pd.to_datetime(
+            serie_num,
+            unit="ms",
+            utc=True,
+            errors="coerce"
+        ).dt.tz_convert("America/Sao_Paulo")
+
+    return pd.to_datetime(
+        serie,
+        utc=True,
+        errors="coerce"
+    ).dt.tz_convert("America/Sao_Paulo")
+
+
+def buscar_historico_refresh(modelo, workspace=None, top_n=20):
+    """
+    Busca o histórico de refresh de um modelo semântico no Fabric.
+    """
+    if workspace:
+        df = fabric.list_refresh_requests(
+            dataset=modelo,
+            workspace=workspace,
+            top_n=top_n
+        )
+    else:
+        df = fabric.list_refresh_requests(
+            dataset=modelo,
+            top_n=top_n
+        )
+
+    df = df.copy()
+    df.columns = [str(col).strip() for col in df.columns]
+
+    return df
+
+
+# =========================
+# BUSCAR HISTÓRICO
+# =========================
+
+df_refresh = buscar_historico_refresh(
+    modelo=modelo,
+    workspace=workspace,
+    top_n=top_n
+)
+
+print("Colunas encontradas:")
+print(df_refresh.columns.tolist())
+
+display(df_refresh)
