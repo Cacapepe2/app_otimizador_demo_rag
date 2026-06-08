@@ -1,0 +1,845 @@
+import time
+import json
+import pandas as pd
+import sempy.fabric as fabric
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+
+# ============================================================
+# CONFIGURAÇÕES GERAIS
+# ============================================================
+
+# Se o notebook está no mesmo workspace que os modelos, deixe None
+workspace = None
+
+# Se quiser especificar outro workspace, use:
+# workspace = "NOME_EXATO_DO_WORKSPACE"
+
+workspace_nome_log = "workspace_atual" if workspace is None else workspace
+
+# Quantos refreshes recentes buscar por modelo
+top_n_refresh = 20
+
+# Retry automático para erro de timeout
+executar_retry_timeout = True
+
+# Espera antes do retry em minutos
+espera_retry_minutos = 10
+
+# Máximo de retries por modelo nesta execução
+max_retries_por_modelo = 1
+
+# Máximo de modelos que podem receber retry nesta execução inteira
+# Isso evita ficar horas rodando se vários modelos derem timeout
+max_modelos_com_retry_por_execucao = 3
+
+# Tipo de refresh usado no retry
+tipo_refresh_retry = "full"
+
+# Tempo máximo para monitorar cada retry
+tempo_max_monitoramento_retry_minutos = 90
+
+# Intervalo de checagem do status do retry
+intervalo_monitoramento_segundos = 30
+
+# Nome das tabelas no Lakehouse
+tabela_controle_atual = "bi_refresh_controle_atual"
+tabela_historico = "bi_refresh_historico"
+tabela_agendamento = "bi_refresh_agendamento"
+
+
+# ============================================================
+# MODELOS A EXCLUIR
+# ============================================================
+
+# Exclusão por nome exato
+modelos_excluir_exato = [
+    "Report Usage Metrics Model",
+    "Usage Metrics Report"
+]
+
+# Exclusão se o nome contiver algum desses textos
+modelos_excluir_contem = [
+    "Usage Metrics",
+    "Report Usage Metrics"
+]
+
+# Opcional: se quiser monitorar só alguns modelos, preencha essa lista.
+# Se deixar vazia, monitora todos, exceto os excluídos.
+modelos_incluir_apenas = [
+    # "Móvel - Licenciamento Anatel",
+    # "Móvel - WR Pendentes"
+]
+
+
+# ============================================================
+# FUNÇÕES AUXILIARES
+# ============================================================
+
+def agora_brt():
+    return datetime.now(ZoneInfo("America/Sao_Paulo")).replace(tzinfo=None)
+
+
+def normalizar_colunas(df):
+    df = df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+    return df
+
+
+def obter_valor_linha(linha, nomes_possiveis, default=None):
+    for nome in nomes_possiveis:
+        if nome in linha.index:
+            return linha.get(nome)
+    return default
+
+
+def converter_para_brt(valor):
+    """
+    Converte:
+    - timestamp em milissegundos: 1780923604083
+    - timestamp em segundos
+    - datetime/string UTC: 2026-06-08 13:00:04.083000+00:00
+    
+    Retorna datetime sem timezone em horário de Brasília.
+    """
+    if pd.isna(valor):
+        return pd.NaT
+
+    valor_str = str(valor).strip()
+
+    try:
+        if valor_str.replace(".", "", 1).isdigit():
+            valor_num = float(valor_str)
+
+            if valor_num > 10**11:
+                dt = pd.to_datetime(valor_num, unit="ms", utc=True)
+            else:
+                dt = pd.to_datetime(valor_num, unit="s", utc=True)
+        else:
+            dt = pd.to_datetime(valor_str, utc=True, errors="coerce")
+
+        if pd.isna(dt):
+            return pd.NaT
+
+        return dt.tz_convert("America/Sao_Paulo").tz_localize(None)
+
+    except Exception:
+        return pd.NaT
+
+
+def texto_seguro(valor):
+    if pd.isna(valor):
+        return ""
+    return str(valor)
+
+
+def classificar_erro(status, extended_status, service_exception_json, refresh_attempts):
+    """
+    Classifica o erro em:
+    - Sem Erro
+    - Erro de Time Out
+    - Necessário Intervenção
+    """
+    status_txt = texto_seguro(status).lower()
+    extended_txt = texto_seguro(extended_status).lower()
+    exception_txt = texto_seguro(service_exception_json).lower()
+    attempts_txt = texto_seguro(refresh_attempts).lower()
+
+    texto_geral = " ".join([
+        status_txt,
+        extended_txt,
+        exception_txt,
+        attempts_txt
+    ])
+
+    if "completed" in status_txt and "failed" not in status_txt:
+        return "Sem Erro"
+
+    palavras_timeout = [
+        "timeout",
+        "time out",
+        "timed out",
+        "deadline",
+        "expired",
+        "gateway timeout",
+        "operation has timed out",
+        "timeout period elapsed"
+    ]
+
+    if any(p in texto_geral for p in palavras_timeout):
+        return "Erro de Time Out"
+
+    if "failed" in status_txt or "cancelled" in status_txt or "disabled" in status_txt:
+        return "Necessário Intervenção"
+
+    if service_exception_json not in [None, "", "NULL"] and not pd.isna(service_exception_json):
+        return "Necessário Intervenção"
+
+    return "Sem Erro"
+
+
+def deve_excluir_modelo(nome_modelo):
+    nome = str(nome_modelo).strip()
+
+    if modelos_incluir_apenas:
+        return nome not in modelos_incluir_apenas
+
+    if nome in modelos_excluir_exato:
+        return True
+
+    nome_lower = nome.lower()
+
+    for termo in modelos_excluir_contem:
+        if termo.lower() in nome_lower:
+            return True
+
+    return False
+
+
+def buscar_datasets():
+    if workspace:
+        df = fabric.list_datasets(workspace=workspace)
+    else:
+        df = fabric.list_datasets()
+
+    df = normalizar_colunas(df)
+
+    if "Dataset Name" not in df.columns or "Dataset ID" not in df.columns:
+        raise Exception(f"Colunas esperadas não encontradas. Colunas retornadas: {df.columns.tolist()}")
+
+    df = df.copy()
+    df["monitorar"] = ~df["Dataset Name"].apply(deve_excluir_modelo)
+
+    return df
+
+
+def buscar_historico_refresh(modelo):
+    try:
+        if workspace:
+            df = fabric.list_refresh_requests(
+                dataset=modelo,
+                workspace=workspace,
+                top_n=top_n_refresh
+            )
+        else:
+            df = fabric.list_refresh_requests(
+                dataset=modelo,
+                top_n=top_n_refresh
+            )
+
+        df = normalizar_colunas(df)
+        return df, None
+
+    except Exception as e:
+        return pd.DataFrame(), str(e)
+
+
+def tratar_historico_refresh(df_refresh, modelo, dataset_id):
+    if df_refresh.empty:
+        return pd.DataFrame()
+
+    df = df_refresh.copy()
+
+    df["workspace"] = workspace_nome_log
+    df["dataset_id"] = dataset_id
+    df["modelo"] = modelo
+    df["data_coleta"] = agora_brt()
+
+    if "Start Time" in df.columns:
+        df["inicio_refresh_brt"] = df["Start Time"].apply(converter_para_brt)
+    else:
+        df["inicio_refresh_brt"] = pd.NaT
+
+    if "End Time" in df.columns:
+        df["fim_refresh_brt"] = df["End Time"].apply(converter_para_brt)
+    else:
+        df["fim_refresh_brt"] = pd.NaT
+
+    df["duracao_minutos"] = (
+        df["fim_refresh_brt"] - df["inicio_refresh_brt"]
+    ).dt.total_seconds() / 60
+
+    if "Status" not in df.columns:
+        df["Status"] = None
+
+    if "Extended Status" not in df.columns:
+        df["Extended Status"] = None
+
+    if "Service Exception Json" not in df.columns:
+        df["Service Exception Json"] = None
+
+    if "Refresh Attempts" not in df.columns:
+        df["Refresh Attempts"] = None
+
+    if "Refresh Type" not in df.columns:
+        df["Refresh Type"] = None
+
+    if "Request Id" not in df.columns:
+        df["Request Id"] = None
+
+    df["tipo_erro"] = df.apply(
+        lambda linha: classificar_erro(
+            linha.get("Status"),
+            linha.get("Extended Status"),
+            linha.get("Service Exception Json"),
+            linha.get("Refresh Attempts")
+        ),
+        axis=1
+    )
+
+    df["foi_timeout"] = df["tipo_erro"].eq("Erro de Time Out")
+
+    df["inicio_refresh_texto"] = df["inicio_refresh_brt"].dt.strftime("%d/%m/%Y %H:%M:%S")
+    df["fim_refresh_texto"] = df["fim_refresh_brt"].dt.strftime("%d/%m/%Y %H:%M:%S")
+
+    df = df.sort_values(
+        by=["inicio_refresh_brt", "fim_refresh_brt"],
+        ascending=False,
+        na_position="last"
+    )
+
+    return df
+
+
+def buscar_agendamento(modelo, dataset_id):
+    try:
+        if workspace:
+            workspace_id = fabric.resolve_workspace_id(workspace)
+        else:
+            workspace_id = fabric.get_workspace_id()
+
+        client = fabric.PowerBIRestClient()
+
+        response = client.get(
+            f"/v1.0/myorg/groups/{workspace_id}/datasets/{dataset_id}/refreshSchedule"
+        )
+
+        schedule = response.json()
+
+        return schedule, None
+
+    except Exception as e:
+        return {}, str(e)
+
+
+def tratar_agendamento(schedule, modelo, dataset_id):
+    data_coleta = agora_brt()
+
+    if not schedule:
+        return pd.DataFrame([{
+            "data_coleta": data_coleta,
+            "workspace": workspace_nome_log,
+            "dataset_id": dataset_id,
+            "modelo": modelo,
+            "dia_agendado": None,
+            "horario_agendado": None,
+            "agendamento_habilitado": None,
+            "fuso_horario": None,
+            "notificacao": None,
+            "agendamento_raw_json": None
+        }])
+
+    days = schedule.get("days", [])
+    times = schedule.get("times", [])
+    enabled = schedule.get("enabled")
+    timezone = schedule.get("localTimeZoneId")
+    notify = schedule.get("notifyOption")
+
+    linhas = []
+
+    if not days:
+        days = [None]
+
+    if not times:
+        times = [None]
+
+    for dia in days:
+        for horario in times:
+            linhas.append({
+                "data_coleta": data_coleta,
+                "workspace": workspace_nome_log,
+                "dataset_id": dataset_id,
+                "modelo": modelo,
+                "dia_agendado": dia,
+                "horario_agendado": horario,
+                "agendamento_habilitado": enabled,
+                "fuso_horario": timezone,
+                "notificacao": notify,
+                "agendamento_raw_json": json.dumps(schedule, ensure_ascii=False)
+            })
+
+    return pd.DataFrame(linhas)
+
+
+def montar_resumo_agendamento(schedule):
+    if not schedule:
+        return {
+            "agendamento_habilitado": None,
+            "agendamento_dias": None,
+            "agendamento_horarios": None,
+            "agendamento_fuso": None,
+            "agendamento_notificacao": None
+        }
+
+    days = schedule.get("days", [])
+    times = schedule.get("times", [])
+
+    return {
+        "agendamento_habilitado": schedule.get("enabled"),
+        "agendamento_dias": ", ".join(days) if days else None,
+        "agendamento_horarios": ", ".join(times) if times else None,
+        "agendamento_fuso": schedule.get("localTimeZoneId"),
+        "agendamento_notificacao": schedule.get("notifyOption")
+    }
+
+
+def monitorar_request(modelo, request_id):
+    inicio = time.time()
+
+    while True:
+        df_status, erro = buscar_historico_refresh(modelo)
+
+        if erro:
+            print(f"Erro ao monitorar {modelo}: {erro}")
+            return "Erro ao monitorar"
+
+        if df_status.empty:
+            print(f"Ainda sem histórico para {modelo}.")
+        else:
+            df_status = normalizar_colunas(df_status)
+
+            if "Request Id" in df_status.columns:
+                df_req = df_status[
+                    df_status["Request Id"].astype(str).str.lower() == str(request_id).lower()
+                ].copy()
+            else:
+                df_req = pd.DataFrame()
+
+            if not df_req.empty:
+                status = df_req.iloc[0].get("Status")
+                extended = df_req.iloc[0].get("Extended Status")
+
+                print(f"Modelo: {modelo} | Status retry: {status} | Extended: {extended}")
+
+                if str(status).lower() in ["completed", "failed", "cancelled", "disabled"]:
+                    return status
+
+        tempo_decorrido_min = (time.time() - inicio) / 60
+
+        if tempo_decorrido_min > tempo_max_monitoramento_retry_minutos:
+            print(f"Tempo máximo de monitoramento atingido para {modelo}.")
+            return "Timeout Monitoramento"
+
+        time.sleep(intervalo_monitoramento_segundos)
+
+
+def disparar_retry_full(modelo):
+    if workspace:
+        request_id = fabric.refresh_dataset(
+            dataset=modelo,
+            workspace=workspace,
+            refresh_type=tipo_refresh_retry,
+            verbose=1
+        )
+    else:
+        request_id = fabric.refresh_dataset(
+            dataset=modelo,
+            refresh_type=tipo_refresh_retry,
+            verbose=1
+        )
+
+    return request_id
+
+
+def criar_controle_atual(modelo, dataset_id, df_hist_modelo, schedule, erro_historico=None, erro_schedule=None,
+                         tentou_retry=False, retry_request_id=None, retry_status=None):
+    data_coleta = agora_brt()
+
+    resumo_ag = montar_resumo_agendamento(schedule)
+
+    if erro_historico:
+        return {
+            "data_coleta": data_coleta,
+            "workspace": workspace_nome_log,
+            "dataset_id": dataset_id,
+            "modelo": modelo,
+            "status_observabilidade": "ERRO_COLETA_HISTORICO",
+            "mensagem_observabilidade": erro_historico,
+            "ultima_atualizacao_inicio": None,
+            "ultima_atualizacao_fim": None,
+            "ultima_atualizacao_inicio_texto": None,
+            "ultima_atualizacao_fim_texto": None,
+            "duracao_minutos": None,
+            "refresh_type": None,
+            "refresh_status": None,
+            "extended_status": None,
+            "request_id": None,
+            "tipo_erro": "Necessário Intervenção",
+            "tentou_retry_timeout": tentou_retry,
+            "retry_request_id": retry_request_id,
+            "retry_status": retry_status,
+            "erro_schedule": erro_schedule,
+            **resumo_ag
+        }
+
+    if df_hist_modelo.empty:
+        return {
+            "data_coleta": data_coleta,
+            "workspace": workspace_nome_log,
+            "dataset_id": dataset_id,
+            "modelo": modelo,
+            "status_observabilidade": "SEM_HISTORICO",
+            "mensagem_observabilidade": "Modelo sem histórico de atualização retornado.",
+            "ultima_atualizacao_inicio": None,
+            "ultima_atualizacao_fim": None,
+            "ultima_atualizacao_inicio_texto": None,
+            "ultima_atualizacao_fim_texto": None,
+            "duracao_minutos": None,
+            "refresh_type": None,
+            "refresh_status": None,
+            "extended_status": None,
+            "request_id": None,
+            "tipo_erro": "Necessário Intervenção",
+            "tentou_retry_timeout": tentou_retry,
+            "retry_request_id": retry_request_id,
+            "retry_status": retry_status,
+            "erro_schedule": erro_schedule,
+            **resumo_ag
+        }
+
+    df_completed = df_hist_modelo[
+        df_hist_modelo["Status"].astype(str).str.lower().eq("completed")
+    ].copy()
+
+    if not df_completed.empty:
+        ultima_sucesso = df_completed.sort_values(
+            by=["fim_refresh_brt", "inicio_refresh_brt"],
+            ascending=False,
+            na_position="last"
+        ).iloc[0]
+    else:
+        ultima_sucesso = None
+
+    ultimo_refresh = df_hist_modelo.sort_values(
+        by=["inicio_refresh_brt", "fim_refresh_brt"],
+        ascending=False,
+        na_position="last"
+    ).iloc[0]
+
+    tipo_erro_ultimo = ultimo_refresh.get("tipo_erro")
+
+    if ultima_sucesso is not None:
+        fim = ultima_sucesso.get("fim_refresh_brt")
+        horas_desde = None
+
+        if pd.notna(fim):
+            horas_desde = (data_coleta - fim).total_seconds() / 3600
+
+        if tipo_erro_ultimo == "Sem Erro":
+            status_obs = "OK"
+            msg_obs = "Último refresh concluído com sucesso."
+        elif tipo_erro_ultimo == "Erro de Time Out":
+            status_obs = "ERRO_TIMEOUT"
+            msg_obs = "Último refresh falhou por possível timeout."
+        else:
+            status_obs = "ERRO_INTERVENCAO"
+            msg_obs = "Último refresh falhou e exige intervenção."
+
+        return {
+            "data_coleta": data_coleta,
+            "workspace": workspace_nome_log,
+            "dataset_id": dataset_id,
+            "modelo": modelo,
+            "status_observabilidade": status_obs,
+            "mensagem_observabilidade": msg_obs,
+            "ultima_atualizacao_inicio": ultima_sucesso.get("inicio_refresh_brt"),
+            "ultima_atualizacao_fim": ultima_sucesso.get("fim_refresh_brt"),
+            "ultima_atualizacao_inicio_texto": ultima_sucesso.get("inicio_refresh_texto"),
+            "ultima_atualizacao_fim_texto": ultima_sucesso.get("fim_refresh_texto"),
+            "duracao_minutos": ultima_sucesso.get("duracao_minutos"),
+            "horas_desde_ultima_atualizacao": horas_desde,
+            "refresh_type": ultima_sucesso.get("Refresh Type"),
+            "refresh_status": ultima_sucesso.get("Status"),
+            "extended_status": ultima_sucesso.get("Extended Status"),
+            "request_id": ultima_sucesso.get("Request Id"),
+            "ultimo_refresh_status": ultimo_refresh.get("Status"),
+            "ultimo_refresh_tipo_erro": tipo_erro_ultimo,
+            "ultimo_refresh_request_id": ultimo_refresh.get("Request Id"),
+            "tentou_retry_timeout": tentou_retry,
+            "retry_request_id": retry_request_id,
+            "retry_status": retry_status,
+            "erro_schedule": erro_schedule,
+            **resumo_ag
+        }
+
+    return {
+        "data_coleta": data_coleta,
+        "workspace": workspace_nome_log,
+        "dataset_id": dataset_id,
+        "modelo": modelo,
+        "status_observabilidade": "NUNCA_CONCLUIU",
+        "mensagem_observabilidade": "Não foi encontrado refresh concluído com sucesso.",
+        "ultima_atualizacao_inicio": None,
+        "ultima_atualizacao_fim": None,
+        "ultima_atualizacao_inicio_texto": None,
+        "ultima_atualizacao_fim_texto": None,
+        "duracao_minutos": None,
+        "horas_desde_ultima_atualizacao": None,
+        "refresh_type": None,
+        "refresh_status": None,
+        "extended_status": None,
+        "request_id": None,
+        "ultimo_refresh_status": ultimo_refresh.get("Status"),
+        "ultimo_refresh_tipo_erro": tipo_erro_ultimo,
+        "ultimo_refresh_request_id": ultimo_refresh.get("Request Id"),
+        "tipo_erro": tipo_erro_ultimo,
+        "tentou_retry_timeout": tentou_retry,
+        "retry_request_id": retry_request_id,
+        "retry_status": retry_status,
+        "erro_schedule": erro_schedule,
+        **resumo_ag
+    }
+
+
+def salvar_overwrite(df_pd, nome_tabela):
+    if df_pd.empty:
+        print(f"Nenhum dado para gravar em {nome_tabela}.")
+        return
+
+    spark_df = spark.createDataFrame(df_pd)
+
+    spark_df.write \
+        .format("delta") \
+        .mode("overwrite") \
+        .option("overwriteSchema", "true") \
+        .saveAsTable(nome_tabela)
+
+    print(f"Tabela gravada com overwrite: {nome_tabela}")
+
+
+def salvar_historico_sem_duplicar(df_novo, nome_tabela):
+    if df_novo.empty:
+        print(f"Nenhum histórico novo para gravar em {nome_tabela}.")
+        return
+
+    try:
+        df_existente = spark.table(nome_tabela).toPandas()
+        print(f"Histórico existente encontrado: {len(df_existente)} linhas.")
+    except Exception:
+        df_existente = pd.DataFrame()
+        print("Histórico existente não encontrado. Criando tabela nova.")
+
+    df_total = pd.concat([df_existente, df_novo], ignore_index=True)
+
+    if "dataset_id" in df_total.columns and "Request Id" in df_total.columns:
+        df_total = df_total.sort_values("data_coleta", ascending=False)
+        df_total = df_total.drop_duplicates(
+            subset=["dataset_id", "Request Id"],
+            keep="first"
+        )
+
+    spark_df = spark.createDataFrame(df_total)
+
+    spark_df.write \
+        .format("delta") \
+        .mode("overwrite") \
+        .option("overwriteSchema", "true") \
+        .saveAsTable(nome_tabela)
+
+    print(f"Tabela histórica atualizada sem duplicar request_id: {nome_tabela}")
+
+
+# ============================================================
+# EXECUÇÃO PRINCIPAL
+# ============================================================
+
+print("Iniciando observabilidade de modelos semânticos...")
+print("Workspace:", workspace_nome_log)
+print("Data coleta:", agora_brt())
+
+df_datasets = buscar_datasets()
+
+df_monitorados = df_datasets[df_datasets["monitorar"]].copy()
+df_excluidos = df_datasets[~df_datasets["monitorar"]].copy()
+
+print(f"Total de modelos encontrados: {len(df_datasets)}")
+print(f"Total de modelos monitorados: {len(df_monitorados)}")
+print(f"Total de modelos excluídos: {len(df_excluidos)}")
+
+display(df_monitorados[["Dataset Name", "Dataset ID"]])
+display(df_excluidos[["Dataset Name", "Dataset ID"]])
+
+linhas_controle = []
+linhas_historico = []
+linhas_agendamento = []
+
+qtd_modelos_retry = 0
+
+for idx, row in df_monitorados.iterrows():
+    modelo = row["Dataset Name"]
+    dataset_id = row["Dataset ID"]
+
+    print("\n" + "=" * 80)
+    print(f"Processando modelo: {modelo}")
+    print(f"Dataset ID: {dataset_id}")
+
+    # --------------------------------------------------------
+    # 1. Buscar histórico
+    # --------------------------------------------------------
+    df_refresh_raw, erro_historico = buscar_historico_refresh(modelo)
+
+    if erro_historico:
+        print(f"Erro ao buscar histórico de {modelo}: {erro_historico}")
+        df_hist_modelo = pd.DataFrame()
+    else:
+        df_hist_modelo = tratar_historico_refresh(df_refresh_raw, modelo, dataset_id)
+        print(f"Histórico encontrado: {len(df_hist_modelo)} linhas")
+
+    # --------------------------------------------------------
+    # 2. Buscar agendamento
+    # --------------------------------------------------------
+    schedule, erro_schedule = buscar_agendamento(modelo, dataset_id)
+
+    if erro_schedule:
+        print(f"Erro ao buscar agendamento de {modelo}: {erro_schedule}")
+    else:
+        print("Agendamento encontrado.")
+
+    df_ag_modelo = tratar_agendamento(schedule, modelo, dataset_id)
+    linhas_agendamento.append(df_ag_modelo)
+
+    # --------------------------------------------------------
+    # 3. Verificar se precisa retry por timeout
+    # --------------------------------------------------------
+    tentou_retry = False
+    retry_request_id = None
+    retry_status = None
+
+    if executar_retry_timeout and not df_hist_modelo.empty:
+        df_ordenado = df_hist_modelo.sort_values(
+            by=["inicio_refresh_brt", "fim_refresh_brt"],
+            ascending=False,
+            na_position="last"
+        )
+
+        ultimo_refresh = df_ordenado.iloc[0]
+        ultimo_status = str(ultimo_refresh.get("Status")).lower()
+        ultimo_tipo_erro = ultimo_refresh.get("tipo_erro")
+
+        if (
+            ultimo_status == "failed"
+            and ultimo_tipo_erro == "Erro de Time Out"
+            and qtd_modelos_retry < max_modelos_com_retry_por_execucao
+        ):
+            print(f"Timeout detectado no último refresh de {modelo}.")
+            print(f"Aguardando {espera_retry_minutos} minutos antes do retry full...")
+
+            time.sleep(espera_retry_minutos * 60)
+
+            try:
+                retry_request_id = disparar_retry_full(modelo)
+                tentou_retry = True
+                qtd_modelos_retry += 1
+
+                print(f"Retry full disparado para {modelo}.")
+                print(f"Retry Request ID: {retry_request_id}")
+
+                retry_status = monitorar_request(modelo, retry_request_id)
+
+                print(f"Retry finalizado com status: {retry_status}")
+
+                # Rebuscar histórico depois do retry
+                df_refresh_raw_pos_retry, erro_hist_pos_retry = buscar_historico_refresh(modelo)
+
+                if not erro_hist_pos_retry:
+                    df_hist_modelo = tratar_historico_refresh(
+                        df_refresh_raw_pos_retry,
+                        modelo,
+                        dataset_id
+                    )
+
+            except Exception as e:
+                tentou_retry = True
+                retry_status = f"Erro ao disparar retry: {e}"
+                print(retry_status)
+
+        elif (
+            ultimo_status == "failed"
+            and ultimo_tipo_erro == "Erro de Time Out"
+            and qtd_modelos_retry >= max_modelos_com_retry_por_execucao
+        ):
+            print("Timeout detectado, mas limite de modelos com retry nesta execução foi atingido.")
+
+    # --------------------------------------------------------
+    # 4. Guardar histórico tratado
+    # --------------------------------------------------------
+    if not df_hist_modelo.empty:
+        df_hist_modelo["tentou_retry_timeout_na_coleta"] = tentou_retry
+        df_hist_modelo["retry_request_id_na_coleta"] = retry_request_id
+        df_hist_modelo["retry_status_na_coleta"] = retry_status
+        linhas_historico.append(df_hist_modelo)
+
+    # --------------------------------------------------------
+    # 5. Montar controle atual
+    # --------------------------------------------------------
+    controle = criar_controle_atual(
+        modelo=modelo,
+        dataset_id=dataset_id,
+        df_hist_modelo=df_hist_modelo,
+        schedule=schedule,
+        erro_historico=erro_historico,
+        erro_schedule=erro_schedule,
+        tentou_retry=tentou_retry,
+        retry_request_id=retry_request_id,
+        retry_status=retry_status
+    )
+
+    linhas_controle.append(controle)
+
+
+# ============================================================
+# MONTAR DATAFRAMES FINAIS
+# ============================================================
+
+df_controle_atual = pd.DataFrame(linhas_controle)
+
+if linhas_historico:
+    df_historico = pd.concat(linhas_historico, ignore_index=True)
+else:
+    df_historico = pd.DataFrame()
+
+if linhas_agendamento:
+    df_agendamento = pd.concat(linhas_agendamento, ignore_index=True)
+else:
+    df_agendamento = pd.DataFrame()
+
+
+# ============================================================
+# ORGANIZAR COLUNAS PRINCIPAIS
+# ============================================================
+
+print("\n" + "=" * 80)
+print("Controle atual:")
+display(df_controle_atual)
+
+print("Histórico:")
+display(df_historico)
+
+print("Agendamento:")
+display(df_agendamento)
+
+
+# ============================================================
+# GRAVAR NO LAKEHOUSE
+# ============================================================
+
+salvar_overwrite(df_controle_atual, tabela_controle_atual)
+salvar_historico_sem_duplicar(df_historico, tabela_historico)
+salvar_overwrite(df_agendamento, tabela_agendamento)
+
+print("\nProcesso concluído.")
+print("Tabelas geradas:")
+print(f"- {tabela_controle_atual}")
+print(f"- {tabela_historico}")
+print(f"- {tabela_agendamento}")
