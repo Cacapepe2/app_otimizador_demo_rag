@@ -1,0 +1,138 @@
+import os
+import re
+import pandas as pd
+from openpyxl import load_workbook
+
+# ==========================================
+# CONFIGURAÇÃO DE PASTAS
+# ==========================================
+# Coloque aqui o caminho da pasta onde estão todas as suas planilhas
+PASTA_ORIGEM = r"C:\Caminho\Para\Sua\Pasta\De\Planilhas"
+ARQUIVO_SAIDA = r"C:\Caminho\Para\Sua\Pasta\De\Planilhas\Consolidado_Carregamento.xlsx"
+
+# Mapeamento dos blocos e seus respectivos status
+TERMOS_CHAVE = {
+    "CARREGAMENTO EXISTENTE": "Existente",
+    "CARREGAMENTO VIVO A RETIRAR": "A Retirar",
+    "CARREGAMENTO VIVO A INSTALAR": "A Instalar"
+}
+
+def extrair_nome_site(nome_arquivo):
+    """
+    Extrai o nome do site (ex: AC_RS) do nome do arquivo.
+    Exemplo esperado: 'tabela de carregamento IBU_RS_PRE...' -> Extrai o miolo relevante.
+    Se o padrão for estrito como 'tabela_de_carregamento_AC_RS.xlsx':
+    """
+    # Remove a extensão do arquivo
+    nome_limpo = os.path.splitext(nome_arquivo)[0]
+    
+    # Substitui espaços por underline para padronizar a busca se necessário
+    nome_limpo = nome_limpo.replace(" ", "_")
+    
+    # Tenta capturar o que vem após 'carregamento_'
+    match = re.search(r"carregamento_(.+)", nome_limpo, re.IGNORECASE)
+    if match:
+        return match.group(1)
+    return nome_limpo # Caso não encontre o padrão, retorna o nome do arquivo limpo
+
+def processar_planilha(caminho_arquivo, nome_site):
+    """
+    Varre a planilha dinamicamente para capturar os 3 blocos de carregamento
+    """
+    wb = load_workbook(caminho_arquivo, data_only=True)
+    # Seleciona a primeira aba ativa ou pelo nome se preferir
+    ws = wb.active 
+    
+    dados_arquivo = []
+    
+    status_atual = None
+    cabecalho_atual = []
+    lendo_dados = False
+    
+    for row in ws.iter_rows(values_only=True):
+        # Ignora linhas completamente vazias no início ou entre blocos
+        if not any(row) and not lendo_dados:
+            continue
+            
+        # Transforma a primeira célula em string para validação de títulos
+        primeira_celula = str(row[0]).strip().upper() if row[0] is not None else ""
+        
+        # 1. Verifica se a linha indica o início de um novo bloco de carregamento
+        bloco_detectado = False
+        for termo, status in TERMOS_CHAVE.items():
+            if termo in primeira_celula:
+                status_atual = status
+                lendo_dados = False
+                cabecalho_atual = []
+                bloco_detectado = True
+                break
+        
+        if bloco_detectado:
+            continue
+            
+        # 2. Se já sabemos o status e ainda não definimos o cabeçalho, a próxima linha válida é o cabeçalho
+        if status_atual and not lendo_dados:
+            if "OPERADORA" in primeira_celula:
+                # Remove valores nulos do fim da linha do cabeçalho
+                cabecalho_atual = [str(c).strip() for c in row if c is not None]
+                lendo_dados = True
+                continue
+        
+        # 3. Se está no modo de leitura de dados, captura as linhas até encontrar um espaço vazio ou fim do bloco
+        if lendo_dados:
+            # Se a linha for vazia ou mudar drasticamente (ex: outra seção), para a leitura deste bloco
+            if not row[0] or "DIMENSÕES" in primeira_celula:
+                lendo_dados = False
+                continue
+                
+            # Alinha os dados com o tamanho do cabeçalho detectado
+            linha_dados = list(row[:len(cabecalho_atual)])
+            
+            # Cria um dicionário para a linha unindo Cabeçalho -> Valor
+            dict_linha = dict(zip(cabecalho_atual, linha_dados))
+            
+            # Adiciona os metadados requisitados
+            dict_linha["SITE"] = nome_site
+            dict_linha["STATUS"] = status_atual
+            
+            dados_arquivo.append(dict_linha)
+            
+    return dados_arquivo
+
+# ==========================================
+# LOOP PRINCIPAL DO PROGRAMA
+# ==========================================
+todos_os_dados = []
+
+print("Iniciando a consolidação das tabelas...")
+
+for arquivo in os.listdir(PASTA_ORIGEM):
+    if arquivo.endswith(".xlsx") and not arquivo.startswith("~$"):
+        caminho_completo = os.path.join(PASTA_ORIGEM, arquivo)
+        nome_site = extrair_nome_site(arquivo)
+        
+        print(f"Processando Site: {nome_site} (Arquivo: {arquivo})")
+        
+        try:
+            dados_planilha = processar_planilha(caminho_completo, nome_site)
+            todos_os_dados.extend(dados_planilha)
+        except Exception as e:
+            print(f"Erro ao processar o arquivo {arquivo}: {e}")
+
+# Transforma a lista de dicionários acumulada em um DataFrame unificado do Pandas
+if todos_os_dados:
+    df_final = pd.DataFrame(todos_os_dados)
+    
+    # Reorganiza as colunas para colocar SITE e STATUS no começo da tabela
+    colunas = ["SITE", "STATUS"] + [col for col in df_final.columns if col not in ["SITE", "STATUS"]]
+    df_final = df_final[colunas]
+    
+    # Remove possíveis linhas onde todas as colunas de dados estejam em branco
+    colunas_dados = [c for c in df_final.columns if c not in ["SITE", "STATUS"]]
+    df_final.dropna(subset=colunas_dados, how="all", inplace=True)
+    
+    # Salva o arquivo final consolidado
+    df_final.to_excel(ARQUIVO_SAIDA, index=False)
+    print(f"\nSucesso! O consolidado foi salvo em:\n{ARQUIVO_SAIDA}")
+else:
+    print("\nNenhum dado foi encontrado nos arquivos analisados.")
