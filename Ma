@@ -1,0 +1,267 @@
+from pathlib import Path
+import re
+import unicodedata
+import pandas as pd
+import pdfplumber
+from tqdm import tqdm
+
+
+# =========================
+# CONFIGURAÇÕES
+# =========================
+
+PASTA_PDFS = Path(r"C:\Users\Caio\Desktop\PDFs")  # pasta onde estão os PDFs
+ARQUIVO_SAIDA = Path(r"C:\Users\Caio\Desktop\tabela_carregamento_consolidada.xlsx")
+
+TITULO_ALVO = "TABELA DE CARREGAMENTO"
+
+
+# =========================
+# FUNÇÕES AUXILIARES
+# =========================
+
+def limpar_texto(valor):
+    """Limpa quebras de linha e espaços duplicados."""
+    if valor is None:
+        return ""
+    valor = str(valor)
+    valor = valor.replace("\n", " ")
+    valor = re.sub(r"\s+", " ", valor)
+    return valor.strip()
+
+
+def normalizar_busca(texto):
+    """Normaliza texto para busca: maiúsculo e sem acento."""
+    texto = limpar_texto(texto).upper()
+    texto = unicodedata.normalize("NFKD", texto)
+    texto = "".join(c for c in texto if not unicodedata.combining(c))
+    return texto
+
+
+def gerar_colunas_unicas(colunas):
+    """
+    Evita erro quando o PDF traz colunas vazias ou repetidas.
+    Mantém o nome original o máximo possível.
+    """
+    novas_colunas = []
+    contador = {}
+
+    for i, col in enumerate(colunas):
+        col = limpar_texto(col)
+
+        if col == "":
+            col = f"COL_{i+1}"
+
+        if col in contador:
+            contador[col] += 1
+            col = f"{col}_{contador[col]}"
+        else:
+            contador[col] = 1
+
+        novas_colunas.append(col)
+
+    return novas_colunas
+
+
+def achar_coluna(df, termo):
+    """Acha uma coluna pelo nome aproximado."""
+    termo = normalizar_busca(termo)
+
+    for col in df.columns:
+        if termo in normalizar_busca(col):
+            return col
+
+    return None
+
+
+def tabela_tem_cabecalho_carregamento(tabela):
+    """Verifica se a tabela extraída parece ser a Tabela de Carregamento."""
+    texto_tabela = " ".join(
+        limpar_texto(celula)
+        for linha in tabela
+        for celula in linha
+    )
+
+    texto_tabela = normalizar_busca(texto_tabela)
+
+    return (
+        "OPERADORA" in texto_tabela
+        and "TECNOLOGIA" in texto_tabela
+        and "SETOR" in texto_tabela
+    )
+
+
+def limpar_tabela_extraida(tabela):
+    """
+    Recebe a tabela bruta do pdfplumber e transforma em DataFrame limpo.
+    Também preenche a Operadora para linhas que vieram de células mescladas.
+    """
+
+    # Limpa células
+    tabela = [
+        [limpar_texto(celula) for celula in linha]
+        for linha in tabela
+        if any(limpar_texto(celula) for celula in linha)
+    ]
+
+    if not tabela:
+        return pd.DataFrame()
+
+    # Procura a linha de cabeçalho
+    indice_cabecalho = None
+
+    for i, linha in enumerate(tabela[:10]):
+        texto_linha = normalizar_busca(" ".join(linha))
+
+        if "OPERADORA" in texto_linha and "TECNOLOGIA" in texto_linha:
+            indice_cabecalho = i
+            break
+
+    if indice_cabecalho is None:
+        return pd.DataFrame()
+
+    colunas = gerar_colunas_unicas(tabela[indice_cabecalho])
+    linhas_dados = tabela[indice_cabecalho + 1:]
+
+    # Ajusta quantidade de colunas em cada linha
+    qtd_colunas = len(colunas)
+    linhas_corrigidas = []
+
+    for linha in linhas_dados:
+        if len(linha) < qtd_colunas:
+            linha = linha + [""] * (qtd_colunas - len(linha))
+        elif len(linha) > qtd_colunas:
+            linha = linha[:qtd_colunas]
+
+        linhas_corrigidas.append(linha)
+
+    df = pd.DataFrame(linhas_corrigidas, columns=colunas)
+
+    # Remove linhas totalmente vazias
+    df = df.replace("", pd.NA)
+    df = df.dropna(how="all")
+
+    if df.empty:
+        return df
+
+    # Remove linhas de total, caso existam
+    # Se você quiser manter "AEV TOTAL NA TORRE", comente essas 3 linhas.
+    mask_total = df.apply(
+        lambda linha: "AEV TOTAL" in normalizar_busca(" ".join(linha.dropna().astype(str))),
+        axis=1
+    )
+    df = df[~mask_total]
+
+    # Preenche operadora em células mescladas:
+    # VIVO aparece uma vez e as linhas de baixo ficam vazias.
+    # O ffill repete VIVO até aparecer CLARO.
+    coluna_operadora = achar_coluna(df, "Operadora")
+
+    if coluna_operadora:
+        df[coluna_operadora] = df[coluna_operadora].ffill()
+
+    return df.reset_index(drop=True)
+
+
+def extrair_tabela_carregamento_pdf(caminho_pdf):
+    """
+    Abre um PDF, procura a página com 'TABELA DE CARREGAMENTO'
+    e extrai a tabela correspondente.
+    """
+
+    tabelas_pdf = []
+
+    sigla_site = caminho_pdf.stem[:5]
+
+    table_settings = {
+        "vertical_strategy": "lines",
+        "horizontal_strategy": "lines",
+        "intersection_tolerance": 5,
+        "snap_tolerance": 3,
+        "join_tolerance": 3,
+        "edge_min_length": 3,
+    }
+
+    with pdfplumber.open(caminho_pdf) as pdf:
+        for numero_pagina, pagina in enumerate(pdf.pages, start=1):
+            texto_pagina = pagina.extract_text() or ""
+
+            # Só tenta extrair se encontrar o título da tabela na página
+            if normalizar_busca(TITULO_ALVO) not in normalizar_busca(texto_pagina):
+                continue
+
+            tabelas = pagina.extract_tables(table_settings=table_settings)
+
+            for tabela in tabelas:
+                if not tabela:
+                    continue
+
+                if tabela_tem_cabecalho_carregamento(tabela):
+                    df = limpar_tabela_extraida(tabela)
+
+                    if not df.empty:
+                        df.insert(0, "pagina_pdf", numero_pagina)
+                        df.insert(0, "arquivo_pdf", caminho_pdf.name)
+                        df.insert(0, "sigla_site", sigla_site)
+
+                        tabelas_pdf.append(df)
+
+    if tabelas_pdf:
+        return pd.concat(tabelas_pdf, ignore_index=True)
+
+    return pd.DataFrame()
+
+
+# =========================
+# EXECUÇÃO EM LOTE
+# =========================
+
+todos_dfs = []
+logs = []
+
+pdfs = sorted(PASTA_PDFS.rglob("*.pdf"))
+
+for pdf in tqdm(pdfs, desc="Extraindo PDFs"):
+    try:
+        df_pdf = extrair_tabela_carregamento_pdf(pdf)
+
+        if df_pdf.empty:
+            logs.append({
+                "arquivo_pdf": pdf.name,
+                "status": "Tabela não encontrada ou não extraída",
+                "erro": ""
+            })
+        else:
+            todos_dfs.append(df_pdf)
+            logs.append({
+                "arquivo_pdf": pdf.name,
+                "status": "OK",
+                "erro": ""
+            })
+
+    except Exception as e:
+        logs.append({
+            "arquivo_pdf": pdf.name,
+            "status": "ERRO",
+            "erro": str(e)
+        })
+
+
+# Junta tudo
+if todos_dfs:
+    df_final = pd.concat(todos_dfs, ignore_index=True)
+else:
+    df_final = pd.DataFrame()
+
+
+df_logs = pd.DataFrame(logs)
+
+# Exporta para Excel
+with pd.ExcelWriter(ARQUIVO_SAIDA, engine="openpyxl") as writer:
+    df_final.to_excel(writer, sheet_name="Tabela_Carregamento", index=False)
+    df_logs.to_excel(writer, sheet_name="Logs", index=False)
+
+print("Extração finalizada!")
+print(f"PDFs processados: {len(pdfs)}")
+print(f"Linhas extraídas: {len(df_final)}")
+print(f"Arquivo gerado: {ARQUIVO_SAIDA}")
