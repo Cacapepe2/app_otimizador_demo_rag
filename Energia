@@ -1,0 +1,56 @@
+import pandas as pd
+
+def validar_depara(df, coluna_codigo, coluna_destino):
+    base = df[[coluna_codigo, coluna_destino]].copy()
+
+    # Evita problemas com número sendo lido como float
+    base[coluna_codigo] = base[coluna_codigo].astype(str).str.strip()
+    base[coluna_destino] = base[coluna_destino].astype(str).str.strip()
+
+    # Remove nulos escritos como texto
+    base = base[
+        (base[coluna_codigo].notna()) &
+        (base[coluna_destino].notna()) &
+        (base[coluna_codigo] != "nan") &
+        (base[coluna_destino] != "nan")
+    ]
+
+    resumo = (
+        base
+        .groupby(coluna_codigo)
+        .agg(
+            qtd_linhas=(coluna_destino, "size"),
+            qtd_valores_diferentes=(coluna_destino, "nunique"),
+            valores_encontrados=(coluna_destino, lambda x: list(sorted(x.unique())))
+        )
+        .reset_index()
+    )
+
+    depara_valido = resumo[resumo["qtd_valores_diferentes"] == 1].copy()
+    conflitos = resumo[resumo["qtd_valores_diferentes"] > 1].copy()
+
+    depara_valido[coluna_destino] = depara_valido["valores_encontrados"].str[0]
+
+    depara_final = depara_valido[
+        [coluna_codigo, coluna_destino, "qtd_linhas"]
+    ].copy()
+
+    acuracia_codigos = len(depara_valido) / len(resumo) * 100 if len(resumo) > 0 else 0
+
+    total_linhas = resumo["qtd_linhas"].sum()
+    linhas_validas = depara_valido["qtd_linhas"].sum()
+    acuracia_linhas = linhas_validas / total_linhas * 100 if total_linhas > 0 else 0
+
+    print(f"Total de códigos analisados: {len(resumo)}")
+    print(f"Códigos com de-para único: {len(depara_valido)}")
+    print(f"Códigos com conflito: {len(conflitos)}")
+    print(f"Acurácia por códigos: {acuracia_codigos:.2f}%")
+    print(f"Acurácia por linhas: {acuracia_linhas:.2f}%")
+
+    return depara_final, conflitos, resumo
+
+depara, conflitos, resumo = validar_depara(
+    df_merged,
+    "sequencia_pessoa_fornecedora",
+    "nome_fornecedor"
+)
