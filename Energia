@@ -1,56 +1,72 @@
 import pandas as pd
 
-def validar_depara(df, coluna_codigo, coluna_destino):
-    base = df[[coluna_codigo, coluna_destino]].copy()
+def procurar_colunas_depara(df, coluna_base):
+    resultados = []
 
-    # Evita problemas com número sendo lido como float
-    base[coluna_codigo] = base[coluna_codigo].astype(str).str.strip()
-    base[coluna_destino] = base[coluna_destino].astype(str).str.strip()
+    for coluna in df.columns:
+        if coluna == coluna_base:
+            continue
 
-    # Remove nulos escritos como texto
-    base = base[
-        (base[coluna_codigo].notna()) &
-        (base[coluna_destino].notna()) &
-        (base[coluna_codigo] != "nan") &
-        (base[coluna_destino] != "nan")
-    ]
+        base = df[[coluna_base, coluna]].copy()
 
-    resumo = (
-        base
-        .groupby(coluna_codigo)
-        .agg(
-            qtd_linhas=(coluna_destino, "size"),
-            qtd_valores_diferentes=(coluna_destino, "nunique"),
-            valores_encontrados=(coluna_destino, lambda x: list(sorted(x.unique())))
+        base[coluna_base] = base[coluna_base].astype(str).str.strip()
+        base[coluna] = base[coluna].astype(str).str.strip()
+
+        base = base[
+            (base[coluna_base].notna()) &
+            (base[coluna].notna()) &
+            (base[coluna_base] != "nan") &
+            (base[coluna] != "nan") &
+            (base[coluna_base] != "") &
+            (base[coluna] != "")
+        ]
+
+        if base.empty:
+            continue
+
+        resumo = (
+            base
+            .groupby(coluna_base)
+            .agg(
+                qtd_linhas=(coluna, "size"),
+                qtd_valores_diferentes=(coluna, "nunique")
+            )
+            .reset_index()
         )
-        .reset_index()
+
+        qtd_codigos = len(resumo)
+        qtd_codigos_unicos = (resumo["qtd_valores_diferentes"] == 1).sum()
+        qtd_codigos_conflito = (resumo["qtd_valores_diferentes"] > 1).sum()
+
+        total_linhas = resumo["qtd_linhas"].sum()
+        linhas_validas = resumo.loc[
+            resumo["qtd_valores_diferentes"] == 1,
+            "qtd_linhas"
+        ].sum()
+
+        acuracia_codigos = qtd_codigos_unicos / qtd_codigos * 100 if qtd_codigos > 0 else 0
+        acuracia_linhas = linhas_validas / total_linhas * 100 if total_linhas > 0 else 0
+
+        resultados.append({
+            "coluna_candidata": coluna,
+            "qtd_codigos": qtd_codigos,
+            "codigos_com_depara_unico": qtd_codigos_unicos,
+            "codigos_com_conflito": qtd_codigos_conflito,
+            "acuracia_por_codigos_%": round(acuracia_codigos, 2),
+            "acuracia_por_linhas_%": round(acuracia_linhas, 2)
+        })
+
+    return (
+        pd.DataFrame(resultados)
+        .sort_values(
+            by=["acuracia_por_codigos_%", "acuracia_por_linhas_%"],
+            ascending=False
+        )
     )
 
-    depara_valido = resumo[resumo["qtd_valores_diferentes"] == 1].copy()
-    conflitos = resumo[resumo["qtd_valores_diferentes"] > 1].copy()
-
-    depara_valido[coluna_destino] = depara_valido["valores_encontrados"].str[0]
-
-    depara_final = depara_valido[
-        [coluna_codigo, coluna_destino, "qtd_linhas"]
-    ].copy()
-
-    acuracia_codigos = len(depara_valido) / len(resumo) * 100 if len(resumo) > 0 else 0
-
-    total_linhas = resumo["qtd_linhas"].sum()
-    linhas_validas = depara_valido["qtd_linhas"].sum()
-    acuracia_linhas = linhas_validas / total_linhas * 100 if total_linhas > 0 else 0
-
-    print(f"Total de códigos analisados: {len(resumo)}")
-    print(f"Códigos com de-para único: {len(depara_valido)}")
-    print(f"Códigos com conflito: {len(conflitos)}")
-    print(f"Acurácia por códigos: {acuracia_codigos:.2f}%")
-    print(f"Acurácia por linhas: {acuracia_linhas:.2f}%")
-
-    return depara_final, conflitos, resumo
-
-depara, conflitos, resumo = validar_depara(
-    df_merged,
-    "sequencia_pessoa_fornecedora",
-    "nome_fornecedor"
+resultado = procurar_colunas_depara(
+    df,
+    coluna_base="sequencia_pessoa_fornecedora"
 )
+
+resultado.head(20)
