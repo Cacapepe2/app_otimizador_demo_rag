@@ -1,0 +1,174 @@
+import pandas as pd
+import numpy as np
+
+
+def converter_ano_mes_para_data(serie):
+    """
+    Converte valores como:
+    2026_06, 2026-06, 2026/06, 2026_6
+
+    Para:
+    2026-06-01
+    """
+
+    texto = serie.astype("string").str.strip()
+
+    partes = texto.str.extract(r"(?P<ano>\d{4})\D?(?P<mes>\d{1,2})")
+
+    data_mes = pd.to_datetime(
+        partes["ano"] + "-" + partes["mes"].str.zfill(2) + "-01",
+        errors="coerce"
+    )
+
+    return data_mes
+
+
+def criar_visao_mensal(
+    df,
+    col_mes,
+    nome_etapa,
+    colunas_base,
+    meses_total=12,
+    hoje=None
+):
+    """
+    Cria uma tabela padronizada para matriz do Power BI.
+
+    Usa somente a coluna de mês.
+    """
+
+    if hoje is None:
+        hoje = pd.Timestamp.today().normalize()
+    else:
+        hoje = pd.Timestamp(hoje).normalize()
+
+    mes_atual = hoje.to_period("M").to_timestamp()
+
+    # 12 colunas no total:
+    # 11 meses explícitos + 1 coluna acumulada ">último mês"
+    meses_explicitos = meses_total - 1
+    mes_limite = mes_atual + pd.DateOffset(months=meses_explicitos - 1)
+
+    df_temp = df[colunas_base + [col_mes]].copy()
+
+    df_temp["etapa"] = nome_etapa
+    df_temp["mes_original"] = df_temp[col_mes]
+
+    df_temp["data_mes"] = converter_ano_mes_para_data(df_temp[col_mes])
+
+    sem_planejamento = df_temp["data_mes"].isna()
+
+    vencido = (
+        df_temp["data_mes"].notna()
+        & (df_temp["data_mes"] < mes_atual)
+    )
+
+    dentro_periodo = (
+        df_temp["data_mes"].notna()
+        & (df_temp["data_mes"] >= mes_atual)
+        & (df_temp["data_mes"] <= mes_limite)
+    )
+
+    futuro_acumulado = (
+        df_temp["data_mes"].notna()
+        & (df_temp["data_mes"] > mes_limite)
+    )
+
+    ordem_mes = (
+        (df_temp["data_mes"].dt.year - mes_atual.year) * 12
+        + (df_temp["data_mes"].dt.month - mes_atual.month)
+    )
+
+    df_temp["status"] = np.select(
+        [
+            sem_planejamento,
+            vencido,
+            dentro_periodo,
+            futuro_acumulado
+        ],
+        [
+            "Sem planejamento",
+            "Vencido",
+            "Planejado",
+            "Planejado"
+        ],
+        default="Verificar"
+    )
+
+    df_temp["bucket"] = np.select(
+        [
+            sem_planejamento,
+            vencido,
+            dentro_periodo,
+            futuro_acumulado
+        ],
+        [
+            "Sem planejamento",
+            "Vencido",
+            df_temp["data_mes"].dt.strftime("%Y_%m"),
+            ">" + mes_limite.strftime("%Y_%m")
+        ],
+        default="Verificar"
+    )
+
+    df_temp["ordem_bucket"] = np.select(
+        [
+            sem_planejamento,
+            vencido,
+            dentro_periodo,
+            futuro_acumulado
+        ],
+        [
+            -2,
+            -1,
+            ordem_mes,
+            meses_total - 1
+        ],
+        default=999
+    ).astype(int)
+
+    df_temp = df_temp.drop(columns=[col_mes])
+
+    return df_temp
+
+
+
+
+---
+
+
+colunas_base = [
+    "ufsigla",
+    "EAP MACRO",
+    "contratação locação score"
+]
+
+
+
+----
+
+
+df_contratacao = criar_visao_mensal(
+    df=df,
+    col_mes="contratação locação mês",
+    nome_etapa="Contratação Locação",
+    colunas_base=colunas_base,
+    meses_total=12
+)
+
+df_rfi = criar_visao_mensal(
+    df=df,
+    col_mes="RFI mês",
+    nome_etapa="RFI",
+    colunas_base=colunas_base,
+    meses_total=12
+)
+
+
+-----
+
+
+df_visao = pd.concat(
+    [df_contratacao, df_rfi],
+    ignore_index=True
+)
