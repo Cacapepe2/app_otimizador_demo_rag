@@ -2,59 +2,79 @@ import pandas as pd
 import numpy as np
 
 
-def converter_ano_mes_para_data(serie):
-    """
-    Converte valores como:
-    2026_06, 2026-06, 2026/06, 2026_6
+# ============================================================
+# 1. FUNÇÃO PARA CONVERTER ANO_MES EM DATA
+# ============================================================
 
-    Para:
-    2026-06-01
-    """
+def converter_ano_mes_para_data(serie):
 
     texto = serie.astype("string").str.strip()
 
-    partes = texto.str.extract(r"(?P<ano>\d{4})\D?(?P<mes>\d{1,2})")
+    partes = texto.str.extract(
+        r"(?P<ano>\d{4})\D?(?P<mes>\d{1,2})"
+    )
 
-    data_mes = pd.to_datetime(
-        partes["ano"] + "-" + partes["mes"].str.zfill(2) + "-01",
+    return pd.to_datetime(
+        partes["ano"]
+        + "-"
+        + partes["mes"].str.zfill(2)
+        + "-01",
         errors="coerce"
     )
 
-    return data_mes
 
+# ============================================================
+# 2. FUNÇÃO QUE CRIA A VISÃO DE CADA ETAPA
+# ============================================================
 
 def criar_visao_mensal(
     df,
+    colunas_comuns,
     col_mes,
+    col_score,
     nome_etapa,
-    colunas_base,
-    meses_total=12,
-    hoje=None
+    meses_total=12
 ):
-    """
-    Cria uma tabela padronizada para matriz do Power BI.
 
-    Usa somente a coluna de mês.
-    """
-
-    if hoje is None:
-        hoje = pd.Timestamp.today().normalize()
-    else:
-        hoje = pd.Timestamp(hoje).normalize()
-
+    # Mês atual
+    hoje = pd.Timestamp.today().normalize()
     mes_atual = hoje.to_period("M").to_timestamp()
 
-    # 12 colunas no total:
-    # 11 meses explícitos + 1 coluna acumulada ">último mês"
+    # 11 meses individuais + 1 coluna final acumulada
     meses_explicitos = meses_total - 1
-    mes_limite = mes_atual + pd.DateOffset(months=meses_explicitos - 1)
 
-    df_temp = df[colunas_base + [col_mes]].copy()
+    mes_limite = (
+        mes_atual
+        + pd.DateOffset(months=meses_explicitos - 1)
+    )
 
+    # Pega:
+    # - as colunas comuns
+    # - o mês específico da etapa
+    # - o score específico da etapa
+    df_temp = df[
+        colunas_comuns
+        + [col_mes, col_score]
+    ].copy()
+
+    # Padroniza os nomes
+    df_temp = df_temp.rename(columns={
+        col_mes: "mes_original",
+        col_score: "score"
+    })
+
+    # Identifica de qual etapa veio a linha
     df_temp["etapa"] = nome_etapa
-    df_temp["mes_original"] = df_temp[col_mes]
 
-    df_temp["data_mes"] = converter_ano_mes_para_data(df_temp[col_mes])
+    # Converte, por exemplo:
+    # 2026_07 -> 01/07/2026
+    df_temp["data_mes"] = converter_ano_mes_para_data(
+        df_temp["mes_original"]
+    )
+
+    # --------------------------------------------------------
+    # REGRAS
+    # --------------------------------------------------------
 
     sem_planejamento = df_temp["data_mes"].isna()
 
@@ -74,10 +94,18 @@ def criar_visao_mensal(
         & (df_temp["data_mes"] > mes_limite)
     )
 
+    # Calcula a posição do mês
     ordem_mes = (
         (df_temp["data_mes"].dt.year - mes_atual.year) * 12
-        + (df_temp["data_mes"].dt.month - mes_atual.month)
+        + (
+            df_temp["data_mes"].dt.month
+            - mes_atual.month
+        )
     )
+
+    # --------------------------------------------------------
+    # STATUS
+    # --------------------------------------------------------
 
     df_temp["status"] = np.select(
         [
@@ -95,6 +123,10 @@ def criar_visao_mensal(
         default="Verificar"
     )
 
+    # --------------------------------------------------------
+    # BUCKET
+    # --------------------------------------------------------
+
     df_temp["bucket"] = np.select(
         [
             sem_planejamento,
@@ -110,6 +142,10 @@ def criar_visao_mensal(
         ],
         default="Verificar"
     )
+
+    # --------------------------------------------------------
+    # ORDEM DO BUCKET
+    # --------------------------------------------------------
 
     df_temp["ordem_bucket"] = np.select(
         [
@@ -127,48 +163,60 @@ def criar_visao_mensal(
         default=999
     ).astype(int)
 
-    df_temp = df_temp.drop(columns=[col_mes])
-
     return df_temp
 
 
+# ============================================================
+# 3. COLUNAS QUE AS DUAS VISÕES TÊM EM COMUM
+# ============================================================
 
-
----
-
-
-colunas_base = [
+colunas_comuns = [
     "ufsigla",
-    "EAP MACRO",
-    "contratação locação score"
+    "EAP MACRO"
 ]
 
 
-
-----
-
+# ============================================================
+# 4. CRIA A VISÃO DE CONTRATAÇÃO LOCAÇÃO
+# ============================================================
 
 df_contratacao = criar_visao_mensal(
     df=df,
+    colunas_comuns=colunas_comuns,
     col_mes="contratação locação mês",
-    nome_etapa="Contratação Locação",
-    colunas_base=colunas_base,
-    meses_total=12
+    col_score="contratação locação score",
+    nome_etapa="Contratação Locação"
 )
+
+
+# ============================================================
+# 5. CRIA A VISÃO DE RFI
+# ============================================================
 
 df_rfi = criar_visao_mensal(
     df=df,
+    colunas_comuns=colunas_comuns,
     col_mes="RFI mês",
-    nome_etapa="RFI",
-    colunas_base=colunas_base,
-    meses_total=12
+    col_score="RFI score",
+    nome_etapa="RFI"
 )
 
 
------
-
+# ============================================================
+# 6. JUNTA CONTRATAÇÃO E RFI
+# ============================================================
 
 df_visao = pd.concat(
-    [df_contratacao, df_rfi],
+    [
+        df_contratacao,
+        df_rfi
+    ],
     ignore_index=True
 )
+
+
+# ============================================================
+# 7. RESULTADO
+# ============================================================
+
+print(df_visao.head())
