@@ -713,4 +713,55 @@ display(
 # ============================================================
 
 with pd.ExcelWriter(
-    ARQUIVO_S
+    ARQUIVO_SAIDA_MKT,
+    engine='openpyxl',
+    datetime_format='dd/mm/yyyy'
+) as writer:
+
+    resumo_mkt.to_excel(
+        writer,
+        sheet_name='Resumo MKT',
+        index=False
+    )
+
+    reconciliacao_sites.to_excel(
+        writer,
+        sheet_name='Reconciliação Sites',
+        index=False
+    )
+
+    detalhe_somente_pmts.to_excel(
+        writer,
+        sheet_name='Somente PMTS',
+        index=False
+    )
+
+    detalhe_somente_mkt.to_excel(
+        writer,
+        sheet_name='Somente MKT',
+        index=False
+    )
+
+    comparacao_ativacao.to_excel(
+        writer,
+        sheet_name='EAP x Valid MKT',
+        index=False
+    )
+
+    nosso_sn.to_excel(
+        writer,
+        sheet_name='Nosso SN',
+        index=False
+    )
+
+    mkt.to_excel(
+        writer,
+        sheet_name='Base MKT',
+        index=False
+    )
+
+
+print(
+    f'\nReconciliação criada: '
+    f'{ARQUIVO_SAIDA_MKT}'
+)
