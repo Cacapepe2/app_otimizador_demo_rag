@@ -1,0 +1,326 @@
+from Conntomysql import Conntomysql
+
+import pandas as pd
+from datetime import datetime
+from pathlib import Path
+
+
+c = Conntomysql()
+
+BANCO = 'prod'
+DATABASE = 'movel_rf'
+TABELA = 'pmts_rf'
+
+ANO_ATUAL = datetime.now().year
+
+
+# ============================================================
+# CONFIGURAÇÕES
+# ============================================================
+
+COBERTURAS_SN = [
+    'Indoor',
+    'Indoor/Outdoor',
+    'Outdoor',
+    'SmallCell'
+]
+
+STATUS_ROLLOUT_SN = [
+    'Disparado Implantação'
+]
+
+TIPOS_INTERVENCAO_SN = [
+    '1.SN',
+    '3.AS',
+    '6.Outros'
+]
+
+OBJETIVOS_ENG_EXCLUIDOS_SN = [
+    'Trial 2026',
+    'Espectro Secundário 2026'
+]
+
+EAP_FINALIZADA = [
+    '29.ATIVO EM PRE ACEITE',
+    '30.ATIVO EM CADASTRO',
+    '31.ATIVO EM ACEITE (O&M)',
+    '32.ATIVO EM ACEITE (IMPLT)',
+    '33.ATIVO E ACEITO'
+]
+
+
+# Colunas de projeto.
+# Quando identificarmos as demais, basta adicioná-las aqui.
+COLUNAS_PROJETO = [
+    'ENG_OBJ_MACRO',
+    'MASTEROBRA_OBJ_ENG',
+]
+
+
+# ============================================================
+# COLUNAS NECESSÁRIAS DA PMTS
+# ============================================================
+
+COLUNAS_PMTS = [
+    # Identificação
+    'UID_IDPMTS',
+    'UID_UFSIGLA',
+    'PMO_REGIONAL',
+    'PMO_UF',
+
+    # Temporal
+    'PMO_CARIMBO_CENTRALIZADO',
+
+    # Regras
+    'MASTERSITE_COBERTURA',
+    'MASTEROBRA_STATUS_ROLLOUT',
+    'PMO_ROLLOUT_OVBK',
+    'PMO_TIPO_INTERV',
+    'PMO_ESCOPO_META',
+    'EAP_AUTOMATICA',
+
+    # Projetos
+    *COLUNAS_PROJETO,
+]
+
+# Remove duplicidade caso uma coluna seja adicionada duas vezes.
+COLUNAS_PMTS = list(dict.fromkeys(COLUNAS_PMTS))
+
+
+# ============================================================
+# 1. LEITURA DA PMTS
+# ============================================================
+
+def I_PMTS():
+    """
+    Lê somente as colunas necessárias para os indicadores
+    monitorados neste projeto.
+    """
+
+    colunas = ', '.join(COLUNAS_PMTS)
+
+    df = c.read_sql(
+        DATABASE,
+        TABELA,
+        BANCO,
+        colunas=colunas
+    )
+
+    # Padroniza a data.
+    df['PMO_CARIMBO_CENTRALIZADO'] = pd.to_datetime(
+        df['PMO_CARIMBO_CENTRALIZADO'],
+        errors='coerce'
+    )
+
+    # Flag reutilizável.
+    df['FINALIZADA'] = df['EAP_AUTOMATICA'].isin(EAP_FINALIZADA)
+
+    return df
+
+
+# ============================================================
+# 2. SITES NOVOS
+# ============================================================
+
+def calcular_sites_novos(pmts):
+    """
+    Regra atual de Sites Novos.
+
+    Para SN, considera obras do ano atual em diante.
+    """
+
+    data_inicio = pd.Timestamp(f'{ANO_ATUAL}-01-01')
+
+    filtro = (
+        pmts['MASTERSITE_COBERTURA'].isin(COBERTURAS_SN)
+        &
+        pmts['MASTEROBRA_STATUS_ROLLOUT'].isin(STATUS_ROLLOUT_SN)
+        &
+        pmts['PMO_ROLLOUT_OVBK'].eq('ORCAMENTO')
+        &
+        pmts['PMO_TIPO_INTERV'].isin(TIPOS_INTERVENCAO_SN)
+        &
+        ~pmts['MASTEROBRA_OBJ_ENG'].isin(OBJETIVOS_ENG_EXCLUIDOS_SN)
+        &
+        (pmts['PMO_CARIMBO_CENTRALIZADO'] >= data_inicio)
+    )
+
+    df = pmts.loc[filtro].copy()
+
+    df['INDICADOR'] = 'SITE NOVO'
+
+    df['COMPETENCIA'] = (
+        df['PMO_CARIMBO_CENTRALIZADO']
+        .dt.to_period('M')
+        .astype(str)
+    )
+
+    return df
+
+
+# ============================================================
+# 3. AMPLIAÇÃO FÍSICA
+# ============================================================
+
+def calcular_ampliacao_fisica(pmts):
+    """
+    Ampliação Física do ano atual.
+    """
+
+    filtro = (
+        pmts['PMO_TIPO_INTERV'].isin(['3.AS', '6.Outros'])
+        &
+        pmts['PMO_ESCOPO_META'].eq('FÍSICA')
+        &
+        pmts['PMO_CARIMBO_CENTRALIZADO'].dt.year.eq(ANO_ATUAL)
+    )
+
+    df = pmts.loc[filtro].copy()
+
+    df['INDICADOR'] = 'AMPLIAÇÃO FÍSICA'
+
+    df['COMPETENCIA'] = (
+        df['PMO_CARIMBO_CENTRALIZADO']
+        .dt.to_period('M')
+        .astype(str)
+    )
+
+    return df
+
+
+# ============================================================
+# 4. AMPLIAÇÃO LÓGICA
+# ============================================================
+
+def calcular_ampliacao_logica(pmts):
+    """
+    Ampliação Lógica do ano atual.
+    """
+
+    filtro = (
+        pmts['PMO_TIPO_INTERV'].isin(['3.AS', '6.Outros'])
+        &
+        pmts['PMO_ESCOPO_META'].eq('LÓGICA')
+        &
+        pmts['PMO_CARIMBO_CENTRALIZADO'].dt.year.eq(ANO_ATUAL)
+    )
+
+    df = pmts.loc[filtro].copy()
+
+    df['INDICADOR'] = 'AMPLIAÇÃO LÓGICA'
+
+    df['COMPETENCIA'] = (
+        df['PMO_CARIMBO_CENTRALIZADO']
+        .dt.to_period('M')
+        .astype(str)
+    )
+
+    return df
+
+
+# ============================================================
+# 5. RESUMO
+# ============================================================
+
+def criar_resumo(sn, ampliacao_fisica, ampliacao_logica):
+
+    dados = []
+
+    for nome, df in {
+        'SITE NOVO': sn,
+        'AMPLIAÇÃO FÍSICA': ampliacao_fisica,
+        'AMPLIAÇÃO LÓGICA': ampliacao_logica
+    }.items():
+
+        dados.append({
+            'INDICADOR': nome,
+            'TOTAL_OBRAS': df['UID_IDPMTS'].nunique(),
+            'FINALIZADAS': df.loc[
+                df['FINALIZADA'],
+                'UID_IDPMTS'
+            ].nunique(),
+            'NAO_FINALIZADAS': df.loc[
+                ~df['FINALIZADA'],
+                'UID_IDPMTS'
+            ].nunique()
+        })
+
+    return pd.DataFrame(dados)
+
+
+# ============================================================
+# 6. EXPORTAÇÃO EXCEL
+# ============================================================
+
+def exportar_excel(saidas, caminho):
+
+    caminho = Path(caminho)
+
+    with pd.ExcelWriter(
+        caminho,
+        engine='openpyxl',
+        datetime_format='dd/mm/yyyy'
+    ) as writer:
+
+        for aba, df in saidas.items():
+            df.to_excel(
+                writer,
+                sheet_name=aba[:31],
+                index=False
+            )
+
+    print(f'Arquivo criado: {caminho}')
+
+
+# ============================================================
+# 7. EXECUÇÃO
+# ============================================================
+
+def main():
+
+    pmts = I_PMTS()
+
+    # Validação importante da chave.
+    duplicados = pmts[
+        pmts['UID_IDPMTS'].duplicated(keep=False)
+    ].copy()
+
+    sn = calcular_sites_novos(pmts)
+    ampliacao_fisica = calcular_ampliacao_fisica(pmts)
+    ampliacao_logica = calcular_ampliacao_logica(pmts)
+
+    resumo = criar_resumo(
+        sn,
+        ampliacao_fisica,
+        ampliacao_logica
+    )
+
+    saidas = {
+        'Resumo': resumo,
+
+        'Sites Novos': sn,
+        'SN Finalizadas': sn[sn['FINALIZADA']].copy(),
+
+        'Ampliação Física': ampliacao_fisica,
+        'AF Finalizadas': ampliacao_fisica[
+            ampliacao_fisica['FINALIZADA']
+        ].copy(),
+
+        'Ampliação Lógica': ampliacao_logica,
+        'AL Finalizadas': ampliacao_logica[
+            ampliacao_logica['FINALIZADA']
+        ].copy(),
+
+        'IDs Duplicados': duplicados,
+    }
+
+    nome_arquivo = (
+        f'observabilidade_pmts_'
+        f'{datetime.now():%Y%m%d}.xlsx'
+    )
+
+    exportar_excel(saidas, nome_arquivo)
+
+
+if __name__ == '__main__':
+    main()
