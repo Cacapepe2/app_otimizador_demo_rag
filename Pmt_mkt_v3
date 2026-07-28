@@ -1,0 +1,1265 @@
+# ============================================================
+# RECONCILIAÇÃO SITES NOVOS
+# PMTS x MKT
+# ============================================================
+
+import pandas as pd
+from datetime import datetime
+
+
+# ============================================================
+# CONFIGURAÇÃO
+# ============================================================
+
+ARQUIVO_MKT = (
+    'SITES NOVOS MKT.xlsx'
+)
+
+ABA_MKT = (
+    'Sheet1'
+)
+
+ARQUIVO_SAIDA_MKT = (
+
+    f'Reconciliacao_SN_MKT_'
+    f'{datetime.now():%Y%m%d}.xlsx'
+)
+
+
+# ============================================================
+# 0. GARANTIR SNAPSHOT NA MEMÓRIA
+# ============================================================
+
+if 'snapshot' not in globals():
+
+    print(
+        'Snapshot não encontrado.'
+    )
+
+    print(
+        'Consultando PMTS atual...'
+    )
+
+    pmts = I_PMTS()
+
+    snapshot = preparar_snapshot(
+        pmts
+    )
+
+else:
+
+    print(
+        'Utilizando snapshot já carregado.'
+    )
+
+
+# ============================================================
+# 1. CARREGAR MKT
+# ============================================================
+
+def carregar_mkt_excel(
+    caminho,
+    aba='Sheet1'
+):
+
+    print(
+        '\nLendo base MKT...'
+    )
+
+    df = pd.read_excel(
+        caminho,
+        sheet_name=aba
+    )
+
+    print(
+        f'{len(df):,} linhas carregadas.'
+    )
+
+    return df
+
+
+# ============================================================
+# 2. NORMALIZAR COLUNAS
+# ============================================================
+
+def normalizar_colunas_mkt(df):
+
+    mkt = df.copy()
+
+    novas_colunas = []
+
+    for coluna in mkt.columns:
+
+        coluna = (
+            str(coluna)
+            .strip()
+        )
+
+        # PMTS_RF.VALID_ATIVACAO
+        # vira
+        # VALID_ATIVACAO
+
+        if '.' in coluna:
+
+            coluna = (
+                coluna
+                .split('.')[-1]
+            )
+
+        novas_colunas.append(
+            coluna.strip()
+        )
+
+    mkt.columns = (
+        novas_colunas
+    )
+
+    return mkt
+
+
+# ============================================================
+# 3. NORMALIZAR CHAVES
+# ============================================================
+
+def normalizar_chaves(df):
+
+    resultado = df.copy()
+
+    for coluna in [
+
+        'UID_IDPMTS',
+        'UID_IDENG',
+        'UID_UFSIGLA'
+
+    ]:
+
+        if coluna in resultado.columns:
+
+            resultado[coluna] = (
+
+                resultado[coluna]
+
+                .astype('string')
+
+                .str.strip()
+
+                .str.upper()
+            )
+
+    return resultado
+
+
+# ============================================================
+# 4. PREPARAR MKT
+# ============================================================
+
+def preparar_mkt(df):
+
+    mkt = (
+        normalizar_colunas_mkt(
+            df
+        )
+    )
+
+    mkt = (
+        normalizar_chaves(
+            mkt
+        )
+    )
+
+    if 'VALID_ATIVACAO' not in mkt.columns:
+
+        raise KeyError(
+            'VALID_ATIVACAO não encontrada no MKT.'
+        )
+
+    mkt[
+        'FLAG_ATIVO_MKT'
+    ] = (
+
+        mkt[
+            'VALID_ATIVACAO'
+        ]
+
+        .astype('string')
+
+        .str.strip()
+
+        .str.upper()
+
+        .eq('[S]')
+    )
+
+    return mkt
+
+
+# ============================================================
+# 5. NOSSO SN
+# ============================================================
+
+def preparar_nosso_sn(snapshot):
+
+    nosso = snapshot[
+        snapshot['FLAG_SN']
+    ].copy()
+
+    nosso = (
+        normalizar_chaves(
+            nosso
+        )
+    )
+
+    return nosso
+
+
+# ============================================================
+# 6. COMPARAÇÃO POR SITE
+# ============================================================
+
+def comparar_sites(
+    nosso,
+    mkt
+):
+
+    sites_nosso = set(
+
+        nosso[
+            'UID_UFSIGLA'
+        ]
+
+        .dropna()
+
+        .unique()
+    )
+
+    sites_mkt = set(
+
+        mkt[
+            'UID_UFSIGLA'
+        ]
+
+        .dropna()
+
+        .unique()
+    )
+
+    comuns = (
+        sites_nosso
+        &
+        sites_mkt
+    )
+
+    somente_pmts = (
+        sites_nosso
+        -
+        sites_mkt
+    )
+
+    somente_mkt = (
+        sites_mkt
+        -
+        sites_nosso
+    )
+
+    return (
+        sites_nosso,
+        sites_mkt,
+        comuns,
+        somente_pmts,
+        somente_mkt
+    )
+
+
+# ============================================================
+# 7. COMPARAÇÃO POR OBRA
+# ============================================================
+
+def comparar_obras(
+    nosso,
+    mkt
+):
+
+    obras_nosso = set(
+
+        nosso[
+            'UID_IDPMTS'
+        ]
+
+        .dropna()
+
+        .unique()
+    )
+
+    obras_mkt = set(
+
+        mkt[
+            'UID_IDPMTS'
+        ]
+
+        .dropna()
+
+        .unique()
+    )
+
+    comuns = (
+        obras_nosso
+        &
+        obras_mkt
+    )
+
+    somente_pmts = (
+        obras_nosso
+        -
+        obras_mkt
+    )
+
+    somente_mkt = (
+        obras_mkt
+        -
+        obras_nosso
+    )
+
+    return (
+        obras_nosso,
+        obras_mkt,
+        comuns,
+        somente_pmts,
+        somente_mkt
+    )
+
+
+# ============================================================
+# 8. COMPARAÇÃO POR IDENG
+# ============================================================
+
+def comparar_ideng(
+    nosso,
+    mkt
+):
+
+    ideng_nosso = set(
+
+        nosso[
+            'UID_IDENG'
+        ]
+
+        .dropna()
+
+        .unique()
+    )
+
+    ideng_mkt = set(
+
+        mkt[
+            'UID_IDENG'
+        ]
+
+        .dropna()
+
+        .unique()
+    )
+
+    comuns = (
+        ideng_nosso
+        &
+        ideng_mkt
+    )
+
+    somente_pmts = (
+        ideng_nosso
+        -
+        ideng_mkt
+    )
+
+    somente_mkt = (
+        ideng_mkt
+        -
+        ideng_nosso
+    )
+
+    return (
+        ideng_nosso,
+        ideng_mkt,
+        comuns,
+        somente_pmts,
+        somente_mkt
+    )
+
+
+# ============================================================
+# 9. RECONCILIAÇÃO POR SITE
+# ============================================================
+
+def montar_reconciliacao_sites(
+    nosso,
+    mkt
+):
+
+    lista_sites = sorted(
+
+        set(
+            nosso[
+                'UID_UFSIGLA'
+            ]
+            .dropna()
+        )
+
+        |
+
+        set(
+            mkt[
+                'UID_UFSIGLA'
+            ]
+            .dropna()
+        )
+    )
+
+    reconciliacao = pd.DataFrame({
+
+        'UID_UFSIGLA':
+            lista_sites
+
+    })
+
+    sites_nosso = set(
+
+        nosso[
+            'UID_UFSIGLA'
+        ]
+
+        .dropna()
+    )
+
+    sites_mkt = set(
+
+        mkt[
+            'UID_UFSIGLA'
+        ]
+
+        .dropna()
+    )
+
+    reconciliacao[
+        'PMTS_SN'
+    ] = (
+
+        reconciliacao[
+            'UID_UFSIGLA'
+        ]
+
+        .isin(
+            sites_nosso
+        )
+    )
+
+    reconciliacao[
+        'MKT_SN'
+    ] = (
+
+        reconciliacao[
+            'UID_UFSIGLA'
+        ]
+
+        .isin(
+            sites_mkt
+        )
+    )
+
+    reconciliacao[
+        'STATUS_ESCOPO'
+    ] = 'COMUM'
+
+    reconciliacao.loc[
+
+        (
+            reconciliacao[
+                'PMTS_SN'
+            ]
+
+            &
+
+            ~reconciliacao[
+                'MKT_SN'
+            ]
+        ),
+
+        'STATUS_ESCOPO'
+
+    ] = 'SOMENTE PMTS'
+
+    reconciliacao.loc[
+
+        (
+            ~reconciliacao[
+                'PMTS_SN'
+            ]
+
+            &
+
+            reconciliacao[
+                'MKT_SN'
+            ]
+        ),
+
+        'STATUS_ESCOPO'
+
+    ] = 'SOMENTE MKT'
+
+    return reconciliacao
+
+
+# ============================================================
+# 10. COMPARAÇÃO DE ATIVAÇÃO
+# ============================================================
+
+def comparar_ativacao_pmts_mkt(
+    nosso,
+    mkt
+):
+
+    # --------------------------------------------------------
+    # MKT
+    # --------------------------------------------------------
+
+    colunas_mkt_desejadas = [
+
+        'UID_IDPMTS',
+        'UID_IDENG',
+        'UID_UFSIGLA',
+
+        'VALID_ATIVACAO',
+        'FLAG_ATIVO_MKT'
+    ]
+
+    colunas_mkt = [
+
+        coluna
+
+        for coluna in colunas_mkt_desejadas
+
+        if coluna in mkt.columns
+    ]
+
+    base_mkt = (
+
+        mkt[
+            colunas_mkt
+        ]
+
+        .drop_duplicates(
+            subset=[
+                'UID_IDPMTS'
+            ]
+        )
+
+        .copy()
+    )
+
+
+    # --------------------------------------------------------
+    # PMTS
+    # --------------------------------------------------------
+
+    colunas_pmts_desejadas = [
+
+        'UID_IDPMTS',
+        'UID_IDENG',
+        'UID_UFSIGLA',
+
+        'EAP_AUTOMATICA',
+        'VALID_ATIVACAO',
+
+        'FLAG_ATIVO_EAP',
+        'FLAG_ATIVO_VALID',
+
+        'ENG_OBJ_MACRO',
+        'MASTEROBRA_OBJ_ENG',
+        'PMO_PROJETO',
+        'PMO_REFERENCIA_REPORT',
+
+        'PMO_REGIONAL',
+        'PMO_UF',
+
+        'REGIONAL_BASELINE_ATIVACAO',
+        'PMO_CARIMBO_BASELINE',
+        'PMO_CARIMBO_CENTRALIZADO',
+
+        'COMPETENCIA'
+    ]
+
+    colunas_pmts = [
+
+        coluna
+
+        for coluna in colunas_pmts_desejadas
+
+        if coluna in nosso.columns
+    ]
+
+    base_pmts = (
+
+        nosso[
+            colunas_pmts
+        ]
+
+        .drop_duplicates(
+            subset=[
+                'UID_IDPMTS'
+            ]
+        )
+
+        .copy()
+    )
+
+
+    # --------------------------------------------------------
+    # MERGE
+    # --------------------------------------------------------
+
+    comparacao = (
+        base_pmts
+
+        .merge(
+
+            base_mkt,
+
+            on='UID_IDPMTS',
+
+            how='inner',
+
+            suffixes=(
+                '_PMTS',
+                '_MKT'
+            )
+        )
+    )
+
+
+    # --------------------------------------------------------
+    # EAP PMTS x VALID MKT
+    # --------------------------------------------------------
+
+    comparacao[
+        'EAP_IGUAL_VALID_MKT'
+    ] = (
+
+        comparacao[
+            'FLAG_ATIVO_EAP'
+        ]
+
+        ==
+
+        comparacao[
+            'FLAG_ATIVO_MKT'
+        ]
+    )
+
+    comparacao[
+        'STATUS_ATIVACAO'
+    ] = (
+
+        comparacao[
+            'EAP_IGUAL_VALID_MKT'
+        ]
+
+        .map({
+
+            True:
+                'OK',
+
+            False:
+                'DIVERGÊNCIA'
+        })
+    )
+
+    return comparacao
+
+
+# ============================================================
+# 11. DETALHAR SITES DIVERGENTES
+# ============================================================
+
+def detalhar_divergencias(
+    nosso,
+    mkt,
+    somente_pmts,
+    somente_mkt
+):
+
+    detalhe_pmts = nosso[
+
+        nosso[
+            'UID_UFSIGLA'
+        ]
+
+        .isin(
+            somente_pmts
+        )
+
+    ].copy()
+
+    detalhe_pmts[
+        'ORIGEM_DIVERGENCIA'
+    ] = 'SOMENTE PMTS'
+
+
+    detalhe_mkt = mkt[
+
+        mkt[
+            'UID_UFSIGLA'
+        ]
+
+        .isin(
+            somente_mkt
+        )
+
+    ].copy()
+
+    detalhe_mkt[
+        'ORIGEM_DIVERGENCIA'
+    ] = 'SOMENTE MKT'
+
+    return (
+        detalhe_pmts,
+        detalhe_mkt
+    )
+
+
+# ============================================================
+# 12. RESUMO
+# ============================================================
+
+def criar_resumo_reconciliacao(
+    nosso,
+    mkt,
+    sites_comuns,
+    somente_pmts,
+    somente_mkt,
+    obras_comuns,
+    obras_somente_pmts,
+    obras_somente_mkt,
+    ideng_comuns,
+    ideng_somente_pmts,
+    ideng_somente_mkt,
+    comparacao_ativacao
+):
+
+    dados = [
+
+        # ----------------------------------------------------
+        # SITE
+        # ----------------------------------------------------
+
+        {
+            'METRICA':
+                'Sites PMTS',
+
+            'VALOR':
+                nosso[
+                    'UID_UFSIGLA'
+                ].nunique()
+        },
+
+        {
+            'METRICA':
+                'Sites MKT',
+
+            'VALOR':
+                mkt[
+                    'UID_UFSIGLA'
+                ].nunique()
+        },
+
+        {
+            'METRICA':
+                'Sites comuns',
+
+            'VALOR':
+                len(
+                    sites_comuns
+                )
+        },
+
+        {
+            'METRICA':
+                'Sites somente PMTS',
+
+            'VALOR':
+                len(
+                    somente_pmts
+                )
+        },
+
+        {
+            'METRICA':
+                'Sites somente MKT',
+
+            'VALOR':
+                len(
+                    somente_mkt
+                )
+        },
+
+        {
+            'METRICA':
+                'Total sites divergentes',
+
+            'VALOR':
+                (
+                    len(
+                        somente_pmts
+                    )
+
+                    +
+
+                    len(
+                        somente_mkt
+                    )
+                )
+        },
+
+        {
+            'METRICA':
+                'Delta líquido PMTS - MKT',
+
+            'VALOR':
+                (
+                    nosso[
+                        'UID_UFSIGLA'
+                    ].nunique()
+
+                    -
+
+                    mkt[
+                        'UID_UFSIGLA'
+                    ].nunique()
+                )
+        },
+
+
+        # ----------------------------------------------------
+        # OBRA
+        # ----------------------------------------------------
+
+        {
+            'METRICA':
+                'Obras PMTS',
+
+            'VALOR':
+                nosso[
+                    'UID_IDPMTS'
+                ].nunique()
+        },
+
+        {
+            'METRICA':
+                'Obras MKT',
+
+            'VALOR':
+                mkt[
+                    'UID_IDPMTS'
+                ].nunique()
+        },
+
+        {
+            'METRICA':
+                'Obras comuns',
+
+            'VALOR':
+                len(
+                    obras_comuns
+                )
+        },
+
+        {
+            'METRICA':
+                'Obras somente PMTS',
+
+            'VALOR':
+                len(
+                    obras_somente_pmts
+                )
+        },
+
+        {
+            'METRICA':
+                'Obras somente MKT',
+
+            'VALOR':
+                len(
+                    obras_somente_mkt
+                )
+        },
+
+
+        # ----------------------------------------------------
+        # IDENG
+        # ----------------------------------------------------
+
+        {
+            'METRICA':
+                'IDENG PMTS',
+
+            'VALOR':
+                nosso[
+                    'UID_IDENG'
+                ].nunique()
+        },
+
+        {
+            'METRICA':
+                'IDENG MKT',
+
+            'VALOR':
+                mkt[
+                    'UID_IDENG'
+                ].nunique()
+        },
+
+        {
+            'METRICA':
+                'IDENG comuns',
+
+            'VALOR':
+                len(
+                    ideng_comuns
+                )
+        },
+
+        {
+            'METRICA':
+                'IDENG somente PMTS',
+
+            'VALOR':
+                len(
+                    ideng_somente_pmts
+                )
+        },
+
+        {
+            'METRICA':
+                'IDENG somente MKT',
+
+            'VALOR':
+                len(
+                    ideng_somente_mkt
+                )
+        },
+
+
+        # ----------------------------------------------------
+        # ATIVAÇÃO
+        # ----------------------------------------------------
+
+        {
+            'METRICA':
+                'Ativos PMTS - EAP',
+
+            'VALOR':
+                nosso.loc[
+
+                    nosso[
+                        'FLAG_ATIVO_EAP'
+                    ],
+
+                    'UID_UFSIGLA'
+
+                ].nunique()
+        },
+
+        {
+            'METRICA':
+                'Ativos PMTS - VALID',
+
+            'VALOR':
+                nosso.loc[
+
+                    nosso[
+                        'FLAG_ATIVO_VALID'
+                    ],
+
+                    'UID_UFSIGLA'
+
+                ].nunique()
+        },
+
+        {
+            'METRICA':
+                'Ativos MKT - VALID',
+
+            'VALOR':
+                mkt.loc[
+
+                    mkt[
+                        'FLAG_ATIVO_MKT'
+                    ],
+
+                    'UID_UFSIGLA'
+
+                ].nunique()
+        },
+
+        {
+            'METRICA':
+                'IDs com divergência EAP x VALID MKT',
+
+            'VALOR':
+                comparacao_ativacao.loc[
+
+                    comparacao_ativacao[
+                        'STATUS_ATIVACAO'
+                    ]
+
+                    .eq(
+                        'DIVERGÊNCIA'
+                    ),
+
+                    'UID_IDPMTS'
+
+                ].nunique()
+        }
+    ]
+
+    return pd.DataFrame(
+        dados
+    )
+
+
+# ============================================================
+# 13. EXECUÇÃO
+# ============================================================
+
+# ------------------------------------------------------------
+# MKT
+# ------------------------------------------------------------
+
+mkt_raw = carregar_mkt_excel(
+    ARQUIVO_MKT,
+    ABA_MKT
+)
+
+mkt = preparar_mkt(
+    mkt_raw
+)
+
+
+# ------------------------------------------------------------
+# NOSSA BASE
+# ------------------------------------------------------------
+
+nosso_sn = preparar_nosso_sn(
+    snapshot
+)
+
+
+# ------------------------------------------------------------
+# SITE
+# ------------------------------------------------------------
+
+(
+    sites_pmts,
+    sites_mkt,
+    sites_comuns,
+    somente_pmts,
+    somente_mkt
+
+) = comparar_sites(
+    nosso_sn,
+    mkt
+)
+
+
+# ------------------------------------------------------------
+# OBRA
+# ------------------------------------------------------------
+
+(
+    obras_pmts,
+    obras_mkt,
+    obras_comuns,
+    obras_somente_pmts,
+    obras_somente_mkt
+
+) = comparar_obras(
+    nosso_sn,
+    mkt
+)
+
+
+# ------------------------------------------------------------
+# IDENG
+# ------------------------------------------------------------
+
+(
+    ideng_pmts,
+    ideng_mkt,
+    ideng_comuns,
+    ideng_somente_pmts,
+    ideng_somente_mkt
+
+) = comparar_ideng(
+    nosso_sn,
+    mkt
+)
+
+
+# ------------------------------------------------------------
+# RECONCILIAÇÃO
+# ------------------------------------------------------------
+
+reconciliacao_sites = (
+    montar_reconciliacao_sites(
+        nosso_sn,
+        mkt
+    )
+)
+
+
+# ------------------------------------------------------------
+# ATIVAÇÃO
+# ------------------------------------------------------------
+
+comparacao_ativacao = (
+    comparar_ativacao_pmts_mkt(
+        nosso_sn,
+        mkt
+    )
+)
+
+
+# ------------------------------------------------------------
+# DETALHE
+# ------------------------------------------------------------
+
+(
+    detalhe_somente_pmts,
+    detalhe_somente_mkt
+
+) = detalhar_divergencias(
+    nosso_sn,
+    mkt,
+    somente_pmts,
+    somente_mkt
+)
+
+
+# ------------------------------------------------------------
+# RESUMO
+# ------------------------------------------------------------
+
+resumo_mkt = (
+    criar_resumo_reconciliacao(
+
+        nosso_sn,
+        mkt,
+
+        sites_comuns,
+        somente_pmts,
+        somente_mkt,
+
+        obras_comuns,
+        obras_somente_pmts,
+        obras_somente_mkt,
+
+        ideng_comuns,
+        ideng_somente_pmts,
+        ideng_somente_mkt,
+
+        comparacao_ativacao
+    )
+)
+
+
+# ============================================================
+# 14. RESULTADO
+# ============================================================
+
+print(
+    '\n========== RECONCILIAÇÃO =========='
+)
+
+display(
+    resumo_mkt
+)
+
+
+print(
+    '\n========== DIVERGÊNCIAS DE ATIVAÇÃO =========='
+)
+
+display(
+
+    comparacao_ativacao[
+
+        comparacao_ativacao[
+            'STATUS_ATIVACAO'
+        ]
+
+        .eq(
+            'DIVERGÊNCIA'
+        )
+    ]
+)
+
+
+# ============================================================
+# 15. EXPORTAR EXCEL
+# ============================================================
+
+with pd.ExcelWriter(
+
+    ARQUIVO_SAIDA_MKT,
+
+    engine='openpyxl',
+
+    datetime_format='dd/mm/yyyy'
+
+) as writer:
+
+    resumo_mkt.to_excel(
+        writer,
+        sheet_name='Resumo MKT',
+        index=False
+    )
+
+    reconciliacao_sites.to_excel(
+        writer,
+        sheet_name='Reconciliação Sites',
+        index=False
+    )
+
+    detalhe_somente_pmts.to_excel(
+        writer,
+        sheet_name='Somente PMTS',
+        index=False
+    )
+
+    detalhe_somente_mkt.to_excel(
+        writer,
+        sheet_name='Somente MKT',
+        index=False
+    )
+
+    comparacao_ativacao.to_excel(
+        writer,
+        sheet_name='EAP x Valid MKT',
+        index=False
+    )
+
+    nosso_sn.to_excel(
+        writer,
+        sheet_name='Nosso SN',
+        index=False
+    )
+
+    mkt.to_excel(
+        writer,
+        sheet_name='Base MKT',
+        index=False
+    )
+
+
+print(
+    f'\nReconciliação criada: '
+    f'{ARQUIVO_SAIDA_MKT}'
+)
