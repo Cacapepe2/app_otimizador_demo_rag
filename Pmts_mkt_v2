@@ -1,0 +1,1337 @@
+from Conntomysql import Conntomysql
+
+import pandas as pd
+from datetime import datetime
+from pathlib import Path
+
+
+# ============================================================
+# CONEXÃO
+# ============================================================
+
+c = Conntomysql()
+
+
+# ============================================================
+# CONFIGURAÇÕES GERAIS
+# ============================================================
+
+BANCO_ORIGEM = 'prod'
+
+DATABASE_ORIGEM = 'movel_rf'
+TABELA_ORIGEM = 'pmts_rf'
+
+DATABASE_HISTORICO = 'cadastro'
+TABELA_SNAPSHOT = 'pmts_observabilidade_snapshot'
+
+ANO_ATUAL = datetime.now().year
+
+# Sites Novos considera 2026 e 2027
+ANOS_SN = [2026, 2027]
+
+EXPORTAR_EXCEL = True
+
+PASTA_SAIDA = Path('.')
+
+
+# ============================================================
+# REGRAS DE NEGÓCIO
+# ============================================================
+
+COBERTURAS_SN = [
+    'Indoor',
+    'Indoor/Outdoor',
+    'Outdoor',
+    'SmallCell'
+]
+
+
+STATUS_ROLLOUT_SN = [
+    'Disparado Implantação'
+]
+
+
+# SN = somente 1.SN
+TIPOS_INTERVENCAO_SN = [
+    '1.SN'
+]
+
+
+TIPOS_INTERVENCAO_AMPLIACAO = [
+    '3.AS',
+    '6.Outros'
+]
+
+
+OBJETIVOS_ENG_EXCLUIDOS_SN = [
+    'Trial 2026',
+    'Espectro Secundário 2026'
+]
+
+
+EAP_FINALIZADA = [
+    '29.ATIVO EM PRE ACEITE',
+    '30.ATIVO EM CADASTRO',
+    '31.ATIVO EM ACEITE (O&M)',
+    '32.ATIVO EM ACEITE (IMPLT)',
+    '33.ATIVO E ACEITO'
+]
+
+
+# ============================================================
+# COLUNAS DE PROJETO
+# ============================================================
+
+COLUNAS_PROJETO = [
+    'ENG_OBJ_MACRO',
+    'MASTEROBRA_OBJ_ENG',
+    'PMO_PROJETO',
+    'PMO_REFERENCIA_REPORT',
+
+    # Futuramente:
+    # 'OUTRA_COLUNA_PROJETO',
+]
+
+
+# ============================================================
+# COLUNAS DA PMTS
+# ============================================================
+
+COLUNAS_PMTS = [
+
+    # --------------------------------------------------------
+    # IDENTIFICAÇÃO
+    # --------------------------------------------------------
+
+    'UID_IDPMTS',
+    'UID_IDENG',
+    'UID_UFSIGLA',
+
+    'PMO_REGIONAL',
+    'PMO_UF',
+
+    # --------------------------------------------------------
+    # DATAS MONITORADAS
+    # --------------------------------------------------------
+
+    'REGIONAL_BASELINE_ATIVACAO',
+    'PMO_CARIMBO_BASELINE',
+    'PMO_CARIMBO_CENTRALIZADO',
+
+    # --------------------------------------------------------
+    # CAMPOS DAS REGRAS
+    # --------------------------------------------------------
+
+    'MASTERSITE_COBERTURA',
+    'MASTEROBRA_STATUS_ROLLOUT',
+    'PMO_ROLLOUT_OVBK',
+    'PMO_TIPO_INTERV',
+    'PMO_ESCOPO_META',
+
+    # --------------------------------------------------------
+    # ATIVAÇÃO
+    # --------------------------------------------------------
+
+    'EAP_AUTOMATICA',
+    'VALID_ATIVACAO',
+
+    # --------------------------------------------------------
+    # PROJETOS
+    # --------------------------------------------------------
+
+    *COLUNAS_PROJETO
+]
+
+
+# Remove duplicidades
+COLUNAS_PMTS = list(
+    dict.fromkeys(COLUNAS_PMTS)
+)
+
+
+# ============================================================
+# 1. LEITURA DA PMTS
+# ============================================================
+
+def I_PMTS():
+
+    colunas = ', '.join(
+        COLUNAS_PMTS
+    )
+
+    print('Lendo PMTS...')
+
+    pmts = c.read_sql(
+        DATABASE_ORIGEM,
+        TABELA_ORIGEM,
+        BANCO_ORIGEM,
+        colunas=colunas
+    )
+
+    print(
+        f'{len(pmts):,} linhas carregadas.'
+    )
+
+    return pmts
+
+
+# ============================================================
+# 2. TRATAMENTO
+# ============================================================
+
+def tratar_pmts(pmts):
+
+    df = pmts.copy()
+
+    # --------------------------------------------------------
+    # DATAS
+    # --------------------------------------------------------
+
+    colunas_data = [
+        'REGIONAL_BASELINE_ATIVACAO',
+        'PMO_CARIMBO_BASELINE',
+        'PMO_CARIMBO_CENTRALIZADO'
+    ]
+
+    for coluna in colunas_data:
+
+        df[coluna] = pd.to_datetime(
+            df[coluna],
+            errors='coerce'
+        )
+
+    # --------------------------------------------------------
+    # NORMALIZAÇÃO DAS CHAVES
+    # --------------------------------------------------------
+
+    for coluna in [
+        'UID_IDPMTS',
+        'UID_IDENG',
+        'UID_UFSIGLA'
+    ]:
+
+        df[coluna] = (
+            df[coluna]
+            .astype('string')
+            .str.strip()
+            .str.upper()
+        )
+
+    # --------------------------------------------------------
+    # COMPETÊNCIA
+    # --------------------------------------------------------
+
+    df['COMPETENCIA'] = (
+        df[
+            'PMO_CARIMBO_CENTRALIZADO'
+        ]
+        .dt.to_period('M')
+        .astype('string')
+    )
+
+    # --------------------------------------------------------
+    # ANO
+    # --------------------------------------------------------
+
+    df[
+        'ANO_CARIMBO_CENTRALIZADO'
+    ] = (
+
+        df[
+            'PMO_CARIMBO_CENTRALIZADO'
+        ]
+
+        .dt.year
+
+        .astype('Int64')
+    )
+
+    # --------------------------------------------------------
+    # FLAG ORIGINAL DE FINALIZAÇÃO
+    # --------------------------------------------------------
+
+    df['FLAG_FINALIZADA'] = (
+        df['EAP_AUTOMATICA']
+        .isin(EAP_FINALIZADA)
+    )
+
+    return df
+
+
+# ============================================================
+# 3. REGRA SITES NOVOS
+# ============================================================
+
+def regra_sn(df):
+
+    return (
+
+        df[
+            'MASTERSITE_COBERTURA'
+        ]
+        .isin(COBERTURAS_SN)
+
+        &
+
+        df[
+            'MASTEROBRA_STATUS_ROLLOUT'
+        ]
+        .isin(STATUS_ROLLOUT_SN)
+
+        &
+
+        df[
+            'PMO_ROLLOUT_OVBK'
+        ]
+        .eq('ORCAMENTO')
+
+        &
+
+        df[
+            'PMO_TIPO_INTERV'
+        ]
+        .isin(TIPOS_INTERVENCAO_SN)
+
+        &
+
+        ~df[
+            'MASTEROBRA_OBJ_ENG'
+        ]
+        .isin(
+            OBJETIVOS_ENG_EXCLUIDOS_SN
+        )
+
+        &
+
+        df[
+            'PMO_CARIMBO_CENTRALIZADO'
+        ]
+        .dt.year
+        .isin(ANOS_SN)
+    )
+
+
+# ============================================================
+# 4. REGRA AMPLIAÇÃO FÍSICA
+# ============================================================
+
+def regra_ampliacao_fisica(df):
+
+    return (
+
+        df[
+            'PMO_ROLLOUT_OVBK'
+        ]
+        .eq('ORCAMENTO')
+
+        &
+
+        df[
+            'PMO_TIPO_INTERV'
+        ]
+        .isin(
+            TIPOS_INTERVENCAO_AMPLIACAO
+        )
+
+        &
+
+        df[
+            'PMO_ESCOPO_META'
+        ]
+        .eq('FÍSICA')
+
+        &
+
+        df[
+            'PMO_CARIMBO_CENTRALIZADO'
+        ]
+        .dt.year
+        .eq(ANO_ATUAL)
+    )
+
+
+# ============================================================
+# 5. REGRA AMPLIAÇÃO LÓGICA
+# ============================================================
+
+def regra_ampliacao_logica(df):
+
+    return (
+
+        df[
+            'PMO_ROLLOUT_OVBK'
+        ]
+        .eq('ORCAMENTO')
+
+        &
+
+        df[
+            'PMO_TIPO_INTERV'
+        ]
+        .isin(
+            TIPOS_INTERVENCAO_AMPLIACAO
+        )
+
+        &
+
+        df[
+            'PMO_ESCOPO_META'
+        ]
+        .eq('LÓGICA')
+
+        &
+
+        df[
+            'PMO_CARIMBO_CENTRALIZADO'
+        ]
+        .dt.year
+        .eq(ANO_ATUAL)
+    )
+
+
+# ============================================================
+# 6. PREPARAR SNAPSHOT
+# ============================================================
+
+def preparar_snapshot(pmts):
+
+    snapshot = tratar_pmts(
+        pmts
+    )
+
+    # --------------------------------------------------------
+    # CLASSIFICAÇÕES
+    # --------------------------------------------------------
+
+    snapshot['FLAG_SN'] = (
+        regra_sn(snapshot)
+    )
+
+    snapshot[
+        'FLAG_AMPLIACAO_FISICA'
+    ] = (
+        regra_ampliacao_fisica(
+            snapshot
+        )
+    )
+
+    snapshot[
+        'FLAG_AMPLIACAO_LOGICA'
+    ] = (
+        regra_ampliacao_logica(
+            snapshot
+        )
+    )
+
+    # --------------------------------------------------------
+    # ATIVAÇÃO - EAP
+    # --------------------------------------------------------
+
+    snapshot[
+        'FLAG_ATIVO_EAP'
+    ] = (
+
+        snapshot[
+            'EAP_AUTOMATICA'
+        ]
+
+        .isin(
+            EAP_FINALIZADA
+        )
+    )
+
+    # --------------------------------------------------------
+    # ATIVAÇÃO - VALID_ATIVACAO
+    # --------------------------------------------------------
+
+    snapshot[
+        'FLAG_ATIVO_VALID'
+    ] = (
+
+        snapshot[
+            'VALID_ATIVACAO'
+        ]
+
+        .astype('string')
+
+        .str.strip()
+
+        .str.upper()
+
+        .eq('[S]')
+    )
+
+    # --------------------------------------------------------
+    # EAP x VALID
+    # --------------------------------------------------------
+
+    snapshot[
+        'DIVERGENCIA_ATIVACAO'
+    ] = (
+
+        snapshot[
+            'FLAG_ATIVO_EAP'
+        ]
+
+        !=
+
+        snapshot[
+            'FLAG_ATIVO_VALID'
+        ]
+    )
+
+    # --------------------------------------------------------
+    # DATA DO SNAPSHOT
+    # --------------------------------------------------------
+
+    agora = pd.Timestamp.now()
+
+    snapshot[
+        'DATA_SNAPSHOT'
+    ] = (
+        agora.normalize()
+    )
+
+    snapshot[
+        'DATA_HORA_CARGA'
+    ] = agora
+
+    return snapshot
+
+
+# ============================================================
+# 7. VALIDAÇÃO
+# ============================================================
+
+def validar_snapshot(snapshot):
+
+    print(
+        '\n=============================='
+    )
+
+    print(
+        'VALIDAÇÃO DO SNAPSHOT'
+    )
+
+    print(
+        '=============================='
+    )
+
+    print(
+        'Linhas totais:',
+        f'{len(snapshot):,}'
+    )
+
+    print(
+        'Obras únicas:',
+        f'{snapshot["UID_IDPMTS"].nunique():,}'
+    )
+
+    print(
+        'IDs Engenharia únicos:',
+        f'{snapshot["UID_IDENG"].nunique():,}'
+    )
+
+    print(
+        'Sites únicos:',
+        f'{snapshot["UID_UFSIGLA"].nunique():,}'
+    )
+
+    # --------------------------------------------------------
+    # DUPLICIDADE IDPMTS
+    # --------------------------------------------------------
+
+    duplicados = snapshot[
+        snapshot[
+            'UID_IDPMTS'
+        ]
+        .duplicated(
+            keep=False
+        )
+    ].copy()
+
+    print(
+        'Linhas com IDPMTS duplicado:',
+        f'{len(duplicados):,}'
+    )
+
+    # --------------------------------------------------------
+    # SITES NOVOS
+    # --------------------------------------------------------
+
+    sn = snapshot[
+        snapshot['FLAG_SN']
+    ].copy()
+
+    print(
+        '\n--- SITES NOVOS ---'
+    )
+
+    print(
+        'Obras:',
+        sn['UID_IDPMTS'].nunique()
+    )
+
+    print(
+        'Sites:',
+        sn['UID_UFSIGLA'].nunique()
+    )
+
+    print(
+        'Ativos por EAP:',
+        sn.loc[
+            sn['FLAG_ATIVO_EAP'],
+            'UID_UFSIGLA'
+        ].nunique()
+    )
+
+    print(
+        'Ativos por VALID_ATIVACAO:',
+        sn.loc[
+            sn['FLAG_ATIVO_VALID'],
+            'UID_UFSIGLA'
+        ].nunique()
+    )
+
+    print(
+        'Sites divergentes EAP x VALID:',
+        sn.loc[
+            sn[
+                'DIVERGENCIA_ATIVACAO'
+            ],
+            'UID_UFSIGLA'
+        ].nunique()
+    )
+
+    # --------------------------------------------------------
+    # AMPLIAÇÃO FÍSICA
+    # --------------------------------------------------------
+
+    af = snapshot[
+        snapshot[
+            'FLAG_AMPLIACAO_FISICA'
+        ]
+    ]
+
+    print(
+        '\n--- AMPLIAÇÃO FÍSICA ---'
+    )
+
+    print(
+        'Obras:',
+        af['UID_IDPMTS'].nunique()
+    )
+
+    print(
+        'Sites:',
+        af['UID_UFSIGLA'].nunique()
+    )
+
+    # --------------------------------------------------------
+    # AMPLIAÇÃO LÓGICA
+    # --------------------------------------------------------
+
+    al = snapshot[
+        snapshot[
+            'FLAG_AMPLIACAO_LOGICA'
+        ]
+    ]
+
+    print(
+        '\n--- AMPLIAÇÃO LÓGICA ---'
+    )
+
+    print(
+        'Obras:',
+        al['UID_IDPMTS'].nunique()
+    )
+
+    print(
+        'Sites:',
+        al['UID_UFSIGLA'].nunique()
+    )
+
+    return duplicados
+
+
+# ============================================================
+# 8. EAP x VALID_ATIVACAO
+# ============================================================
+
+def validar_eap_vs_valid(snapshot):
+
+    resultado = (
+
+        snapshot
+
+        .groupby(
+            [
+                'FLAG_ATIVO_EAP',
+                'FLAG_ATIVO_VALID'
+            ],
+            dropna=False
+        )
+
+        .agg(
+
+            OBRAS=(
+                'UID_IDPMTS',
+                'nunique'
+            ),
+
+            IDENG=(
+                'UID_IDENG',
+                'nunique'
+            ),
+
+            SITES=(
+                'UID_UFSIGLA',
+                'nunique'
+            )
+        )
+
+        .reset_index()
+    )
+
+    resultado[
+        'STATUS'
+    ] = (
+
+        resultado[
+            'FLAG_ATIVO_EAP'
+        ]
+
+        ==
+
+        resultado[
+            'FLAG_ATIVO_VALID'
+        ]
+    )
+
+    resultado[
+        'STATUS'
+    ] = (
+
+        resultado[
+            'STATUS'
+        ]
+
+        .map({
+            True: 'OK',
+            False: 'DIVERGÊNCIA'
+        })
+    )
+
+    return resultado
+
+
+# ============================================================
+# 9. SNAPSHOT JÁ EXISTE?
+# ============================================================
+
+def snapshot_ja_existe():
+
+    hoje = (
+        pd.Timestamp.now()
+        .normalize()
+    )
+
+    try:
+
+        historico = c.read_sql(
+            DATABASE_HISTORICO,
+            TABELA_SNAPSHOT,
+            BANCO_ORIGEM,
+            colunas='DATA_SNAPSHOT'
+        )
+
+        if historico.empty:
+            return False
+
+        historico[
+            'DATA_SNAPSHOT'
+        ] = pd.to_datetime(
+            historico[
+                'DATA_SNAPSHOT'
+            ],
+            errors='coerce'
+        )
+
+        return (
+
+            historico[
+                'DATA_SNAPSHOT'
+            ]
+
+            .dt.normalize()
+
+            .eq(hoje)
+
+            .any()
+        )
+
+    except Exception:
+
+        # Primeira execução
+        return False
+
+
+# ============================================================
+# 10. SALVAR SNAPSHOT
+# ============================================================
+
+def salvar_snapshot(
+    snapshot,
+    force=False
+):
+
+    if (
+        snapshot_ja_existe()
+        and not force
+    ):
+
+        print(
+            '\nATENÇÃO: '
+            'já existe snapshot hoje.'
+        )
+
+        print(
+            'Nada foi inserido novamente.'
+        )
+
+        return False
+
+    print(
+        '\nSalvando snapshot no banco...'
+    )
+
+    c.to_sql(
+        snapshot,
+        DATABASE_HISTORICO,
+        TABELA_SNAPSHOT,
+        'prod',
+        normalize=True,
+        existente='append'
+    )
+
+    print(
+        'Snapshot salvo com sucesso.'
+    )
+
+    return True
+
+
+# ============================================================
+# 11. RESUMO
+# ============================================================
+
+def criar_resumo(snapshot):
+
+    indicadores = {
+
+        'SITE NOVO':
+            'FLAG_SN',
+
+        'AMPLIAÇÃO FÍSICA':
+            'FLAG_AMPLIACAO_FISICA',
+
+        'AMPLIAÇÃO LÓGICA':
+            'FLAG_AMPLIACAO_LOGICA'
+    }
+
+    dados = []
+
+    for nome, flag in indicadores.items():
+
+        df = snapshot[
+            snapshot[flag]
+        ].copy()
+
+        dados.append({
+
+            'INDICADOR':
+                nome,
+
+            'TOTAL_OBRAS':
+                df[
+                    'UID_IDPMTS'
+                ].nunique(),
+
+            'TOTAL_IDENG':
+                df[
+                    'UID_IDENG'
+                ].nunique(),
+
+            'TOTAL_SITES':
+                df[
+                    'UID_UFSIGLA'
+                ].nunique(),
+
+            'ATIVOS_EAP_OBRAS':
+                df.loc[
+                    df[
+                        'FLAG_ATIVO_EAP'
+                    ],
+                    'UID_IDPMTS'
+                ].nunique(),
+
+            'ATIVOS_EAP_SITES':
+                df.loc[
+                    df[
+                        'FLAG_ATIVO_EAP'
+                    ],
+                    'UID_UFSIGLA'
+                ].nunique(),
+
+            'ATIVOS_VALID_OBRAS':
+                df.loc[
+                    df[
+                        'FLAG_ATIVO_VALID'
+                    ],
+                    'UID_IDPMTS'
+                ].nunique(),
+
+            'ATIVOS_VALID_SITES':
+                df.loc[
+                    df[
+                        'FLAG_ATIVO_VALID'
+                    ],
+                    'UID_UFSIGLA'
+                ].nunique(),
+
+            'DIVERGENCIA_ATIVACAO_OBRAS':
+                df.loc[
+                    df[
+                        'DIVERGENCIA_ATIVACAO'
+                    ],
+                    'UID_IDPMTS'
+                ].nunique(),
+
+            'DIVERGENCIA_ATIVACAO_SITES':
+                df.loc[
+                    df[
+                        'DIVERGENCIA_ATIVACAO'
+                    ],
+                    'UID_UFSIGLA'
+                ].nunique(),
+
+            'DATA_SNAPSHOT':
+                snapshot[
+                    'DATA_SNAPSHOT'
+                ].iloc[0]
+        })
+
+    return pd.DataFrame(
+        dados
+    )
+
+
+# ============================================================
+# 12. RESUMO POR COMPETÊNCIA
+# ============================================================
+
+def resumo_por_competencia(snapshot):
+
+    resultados = []
+
+    configuracoes = {
+
+        'SITE NOVO':
+            'FLAG_SN',
+
+        'AMPLIAÇÃO FÍSICA':
+            'FLAG_AMPLIACAO_FISICA',
+
+        'AMPLIAÇÃO LÓGICA':
+            'FLAG_AMPLIACAO_LOGICA'
+    }
+
+    for indicador, flag in configuracoes.items():
+
+        df = snapshot[
+            snapshot[flag]
+        ].copy()
+
+        total = (
+
+            df.groupby(
+                'COMPETENCIA',
+                dropna=False
+            )
+
+            .agg(
+
+                OBRAS=(
+                    'UID_IDPMTS',
+                    'nunique'
+                ),
+
+                IDENG=(
+                    'UID_IDENG',
+                    'nunique'
+                ),
+
+                SITES=(
+                    'UID_UFSIGLA',
+                    'nunique'
+                )
+            )
+
+            .reset_index()
+        )
+
+        ativos_eap = (
+
+            df[
+                df[
+                    'FLAG_ATIVO_EAP'
+                ]
+            ]
+
+            .groupby(
+                'COMPETENCIA',
+                dropna=False
+            )
+
+            .agg(
+
+                ATIVOS_EAP_OBRAS=(
+                    'UID_IDPMTS',
+                    'nunique'
+                ),
+
+                ATIVOS_EAP_SITES=(
+                    'UID_UFSIGLA',
+                    'nunique'
+                )
+            )
+
+            .reset_index()
+        )
+
+        ativos_valid = (
+
+            df[
+                df[
+                    'FLAG_ATIVO_VALID'
+                ]
+            ]
+
+            .groupby(
+                'COMPETENCIA',
+                dropna=False
+            )
+
+            .agg(
+
+                ATIVOS_VALID_OBRAS=(
+                    'UID_IDPMTS',
+                    'nunique'
+                ),
+
+                ATIVOS_VALID_SITES=(
+                    'UID_UFSIGLA',
+                    'nunique'
+                )
+            )
+
+            .reset_index()
+        )
+
+        agrupado = (
+
+            total
+
+            .merge(
+                ativos_eap,
+                on='COMPETENCIA',
+                how='left'
+            )
+
+            .merge(
+                ativos_valid,
+                on='COMPETENCIA',
+                how='left'
+            )
+        )
+
+        agrupado.insert(
+            0,
+            'INDICADOR',
+            indicador
+        )
+
+        resultados.append(
+            agrupado
+        )
+
+    return (
+
+        pd.concat(
+            resultados,
+            ignore_index=True
+        )
+
+        .fillna(0)
+    )
+
+
+# ============================================================
+# 13. EXPORTAR EXCEL
+# ============================================================
+
+def exportar_excel(
+    snapshot,
+    resumo,
+    resumo_competencia,
+    duplicados,
+    validacao_ativacao
+):
+
+    data = (
+        datetime.now()
+        .strftime('%Y%m%d')
+    )
+
+    arquivo = (
+
+        PASTA_SAIDA
+
+        /
+
+        f'observabilidade_pmts_{data}.xlsx'
+    )
+
+    sn = snapshot[
+        snapshot['FLAG_SN']
+    ].copy()
+
+    af = snapshot[
+        snapshot[
+            'FLAG_AMPLIACAO_FISICA'
+        ]
+    ].copy()
+
+    al = snapshot[
+        snapshot[
+            'FLAG_AMPLIACAO_LOGICA'
+        ]
+    ].copy()
+
+    divergencia_ativacao = snapshot[
+        snapshot[
+            'DIVERGENCIA_ATIVACAO'
+        ]
+    ].copy()
+
+    alteracoes_monitoradas = snapshot[[
+
+        'DATA_SNAPSHOT',
+        'DATA_HORA_CARGA',
+
+        'UID_IDPMTS',
+        'UID_IDENG',
+        'UID_UFSIGLA',
+
+        'PMO_REGIONAL',
+        'PMO_UF',
+
+        'REGIONAL_BASELINE_ATIVACAO',
+        'PMO_CARIMBO_BASELINE',
+        'PMO_CARIMBO_CENTRALIZADO',
+
+        'COMPETENCIA',
+
+        'ENG_OBJ_MACRO',
+        'MASTEROBRA_OBJ_ENG',
+        'PMO_PROJETO',
+        'PMO_REFERENCIA_REPORT',
+
+        'MASTERSITE_COBERTURA',
+        'MASTEROBRA_STATUS_ROLLOUT',
+
+        'PMO_ROLLOUT_OVBK',
+        'PMO_TIPO_INTERV',
+        'PMO_ESCOPO_META',
+
+        'EAP_AUTOMATICA',
+        'VALID_ATIVACAO',
+
+        'FLAG_SN',
+        'FLAG_AMPLIACAO_FISICA',
+        'FLAG_AMPLIACAO_LOGICA',
+
+        'FLAG_FINALIZADA',
+        'FLAG_ATIVO_EAP',
+        'FLAG_ATIVO_VALID',
+        'DIVERGENCIA_ATIVACAO'
+
+    ]].copy()
+
+    with pd.ExcelWriter(
+        arquivo,
+        engine='openpyxl',
+        datetime_format='dd/mm/yyyy'
+    ) as writer:
+
+        resumo.to_excel(
+            writer,
+            sheet_name='Resumo',
+            index=False
+        )
+
+        resumo_competencia.to_excel(
+            writer,
+            sheet_name='Por Competência',
+            index=False
+        )
+
+        validacao_ativacao.to_excel(
+            writer,
+            sheet_name='EAP x Valid',
+            index=False
+        )
+
+        divergencia_ativacao.to_excel(
+            writer,
+            sheet_name='Divergência Ativação',
+            index=False
+        )
+
+        sn.to_excel(
+            writer,
+            sheet_name='Sites Novos',
+            index=False
+        )
+
+        af.to_excel(
+            writer,
+            sheet_name='Ampliação Física',
+            index=False
+        )
+
+        al.to_excel(
+            writer,
+            sheet_name='Ampliação Lógica',
+            index=False
+        )
+
+        alteracoes_monitoradas.to_excel(
+            writer,
+            sheet_name='Snapshot',
+            index=False
+        )
+
+        duplicados.to_excel(
+            writer,
+            sheet_name='IDs Duplicados',
+            index=False
+        )
+
+    print(
+        f'\nExcel criado: {arquivo}'
+    )
+
+
+# ============================================================
+# 14. EXECUÇÃO
+# ============================================================
+
+print(
+    '\n========================================'
+)
+
+print(
+    'OBSERVABILIDADE PMTS'
+)
+
+print(
+    '========================================\n'
+)
+
+
+pmts = I_PMTS()
+
+
+snapshot = preparar_snapshot(
+    pmts
+)
+
+
+duplicados = validar_snapshot(
+    snapshot
+)
+
+
+resumo = criar_resumo(
+    snapshot
+)
+
+
+resumo_competencia = (
+    resumo_por_competencia(
+        snapshot
+    )
+)
+
+
+validacao_ativacao = (
+    validar_eap_vs_valid(
+        snapshot
+    )
+)
+
+
+print(
+    '\n=============================='
+)
+
+print(
+    'RESUMO'
+)
+
+print(
+    '=============================='
+)
+
+display(
+    resumo
+)
+
+
+print(
+    '\n=============================='
+)
+
+print(
+    'EAP x VALID_ATIVACAO'
+)
+
+print(
+    '=============================='
+)
+
+display(
+    validacao_ativacao
+)
+
+
+if EXPORTAR_EXCEL:
+
+    exportar_excel(
+        snapshot,
+        resumo,
+        resumo_competencia,
+        duplicados,
+        validacao_ativacao
+    )
+
+
+salvar_snapshot(
+    snapshot
+)
+
+
+print(
+    '\nProcesso concluído.'
+)
