@@ -1,0 +1,2250 @@
+# ============================================================
+# BLOCO 3
+# COMPARAÇÃO ENTRE OS DOIS SNAPSHOTS MAIS RECENTES
+# ============================================================
+
+import pandas as pd
+from datetime import datetime
+from pathlib import Path
+
+
+# ============================================================
+# CONFIGURAÇÕES
+# ============================================================
+
+BANCO_HISTORICO = 'prod'
+DATABASE_HISTORICO = 'cadastro'
+
+TABELA_SNAPSHOT = 'pmts_observabilidade_snapshot'
+
+TABELA_CHANGELOG = 'pmts_observabilidade_changelog'
+TABELA_IMPACTO = 'pmts_observabilidade_impacto'
+
+
+# Primeiro valide o Excel.
+# Depois altere para True para gravar no banco.
+SALVAR_NO_BANCO = False
+
+EXPORTAR_EXCEL_COMPARACAO = True
+
+PASTA_SAIDA_COMPARACAO = Path('.')
+
+
+# ============================================================
+# CAMPOS MONITORADOS
+# ============================================================
+
+COLUNAS_PROJETO_MONITORADAS = [
+    'ENG_OBJ_MACRO',
+    'MASTEROBRA_OBJ_ENG',
+    'PMO_PROJETO',
+    'PMO_REFERENCIA_REPORT',
+]
+
+
+COLUNAS_DATA_MONITORADAS = [
+    'REGIONAL_BASELINE_ATIVACAO',
+    'PMO_CARIMBO_BASELINE',
+    'PMO_CARIMBO_CENTRALIZADO',
+]
+
+
+COLUNAS_CLASSIFICACAO_MONITORADAS = [
+    'PMO_ESCOPO_META',
+    'PMO_ROLLOUT_OVBK',
+]
+
+
+COLUNAS_MONITORADAS = (
+    COLUNAS_PROJETO_MONITORADAS
+    + COLUNAS_DATA_MONITORADAS
+    + COLUNAS_CLASSIFICACAO_MONITORADAS
+)
+
+
+COLUNAS_FLAG_MONITORADAS = [
+    'FLAG_SN',
+    'FLAG_AMPLIACAO_FISICA',
+    'FLAG_AMPLIACAO_LOGICA',
+    'FLAG_ATIVO_EAP',
+    'FLAG_ATIVO_VALID',
+]
+
+
+# Colunas levadas como contexto para os resultados
+COLUNAS_CONTEXTO = [
+    'UID_IDPMTS',
+    'UID_IDENG',
+    'UID_UFSIGLA',
+
+    'PMO_REGIONAL',
+    'PMO_UF',
+
+    'ENG_OBJ_MACRO',
+    'MASTEROBRA_OBJ_ENG',
+    'PMO_PROJETO',
+    'PMO_REFERENCIA_REPORT',
+
+    'REGIONAL_BASELINE_ATIVACAO',
+    'PMO_CARIMBO_BASELINE',
+    'PMO_CARIMBO_CENTRALIZADO',
+
+    'PMO_ESCOPO_META',
+    'PMO_ROLLOUT_OVBK',
+
+    'COMPETENCIA',
+
+    'FLAG_SN',
+    'FLAG_AMPLIACAO_FISICA',
+    'FLAG_AMPLIACAO_LOGICA',
+    'FLAG_ATIVO_EAP',
+    'FLAG_ATIVO_VALID',
+]
+
+
+COLUNAS_LEITURA_HISTORICO = list(
+    dict.fromkeys(
+        [
+            'DATA_SNAPSHOT',
+            'DATA_HORA_CARGA',
+            *COLUNAS_CONTEXTO
+        ]
+    )
+)
+
+
+# ============================================================
+# 1. NORMALIZAR BOOLEANOS
+# ============================================================
+
+def normalizar_booleano(serie):
+
+    """
+    Trata booleanos que podem ter sido gravados no banco como:
+    True/False, 1/0, T/F, S/N, SIM/NÃO ou texto.
+    """
+
+    texto = (
+        serie
+        .astype('string')
+        .str.strip()
+        .str.upper()
+    )
+
+    mapa = {
+        'TRUE': True,
+        'FALSE': False,
+
+        '1': True,
+        '0': False,
+
+        'T': True,
+        'F': False,
+
+        'SIM': True,
+        'NÃO': False,
+        'NAO': False,
+
+        'S': True,
+        'N': False,
+    }
+
+    return (
+        texto
+        .map(mapa)
+        .fillna(False)
+        .astype(bool)
+    )
+
+
+# ============================================================
+# 2. LEITURA DO HISTÓRICO
+# ============================================================
+
+def ler_historico_snapshot():
+
+    colunas = ', '.join(
+        COLUNAS_LEITURA_HISTORICO
+    )
+
+    print(
+        'Lendo histórico de snapshots...'
+    )
+
+    historico = c.read_sql(
+        DATABASE_HISTORICO,
+        TABELA_SNAPSHOT,
+        BANCO_HISTORICO,
+        colunas=colunas
+    )
+
+    if historico.empty:
+
+        raise ValueError(
+            'A tabela histórica está vazia.'
+        )
+
+    print(
+        f'{len(historico):,} linhas carregadas.'
+    )
+
+    return historico
+
+
+# ============================================================
+# 3. TRATAMENTO DO HISTÓRICO
+# ============================================================
+
+def tratar_historico(historico):
+
+    df = historico.copy()
+
+    # --------------------------------------------------------
+    # Datas
+    # --------------------------------------------------------
+
+    colunas_data = [
+        'DATA_SNAPSHOT',
+        'DATA_HORA_CARGA',
+        *COLUNAS_DATA_MONITORADAS
+    ]
+
+    for coluna in colunas_data:
+
+        if coluna in df.columns:
+
+            df[coluna] = pd.to_datetime(
+                df[coluna],
+                errors='coerce'
+            )
+
+    df['DATA_SNAPSHOT'] = (
+        df['DATA_SNAPSHOT']
+        .dt.normalize()
+    )
+
+    # --------------------------------------------------------
+    # Chaves
+    # --------------------------------------------------------
+
+    for coluna in [
+        'UID_IDPMTS',
+        'UID_IDENG',
+        'UID_UFSIGLA'
+    ]:
+
+        if coluna in df.columns:
+
+            df[coluna] = (
+                df[coluna]
+                .astype('string')
+                .str.strip()
+                .str.upper()
+            )
+
+    # --------------------------------------------------------
+    # Flags
+    # --------------------------------------------------------
+
+    for coluna in COLUNAS_FLAG_MONITORADAS:
+
+        if coluna in df.columns:
+
+            df[coluna] = normalizar_booleano(
+                df[coluna]
+            )
+
+    return df
+
+
+# ============================================================
+# 4. SELECIONAR OS DOIS SNAPSHOTS MAIS RECENTES
+# ============================================================
+
+def selecionar_dois_ultimos_snapshots(historico):
+
+    datas_disponiveis = (
+        historico['DATA_SNAPSHOT']
+        .dropna()
+        .drop_duplicates()
+        .sort_values()
+        .tolist()
+    )
+
+    if len(datas_disponiveis) < 2:
+
+        raise ValueError(
+            'São necessários pelo menos dois snapshots '
+            'diferentes para realizar a comparação.'
+        )
+
+    data_anterior = datas_disponiveis[-2]
+    data_atual = datas_disponiveis[-1]
+
+    anterior = historico[
+        historico['DATA_SNAPSHOT']
+        .eq(data_anterior)
+    ].copy()
+
+    atual = historico[
+        historico['DATA_SNAPSHOT']
+        .eq(data_atual)
+    ].copy()
+
+    print(
+        '\nSnapshot anterior:',
+        pd.Timestamp(data_anterior).strftime('%d/%m/%Y')
+    )
+
+    print(
+        'Snapshot atual:',
+        pd.Timestamp(data_atual).strftime('%d/%m/%Y')
+    )
+
+    print(
+        'Linhas no snapshot anterior:',
+        f'{len(anterior):,}'
+    )
+
+    print(
+        'Linhas no snapshot atual:',
+        f'{len(atual):,}'
+    )
+
+    validar_chave_snapshot(
+        anterior,
+        'ANTERIOR'
+    )
+
+    validar_chave_snapshot(
+        atual,
+        'ATUAL'
+    )
+
+    return (
+        anterior,
+        atual,
+        data_anterior,
+        data_atual
+    )
+
+
+# ============================================================
+# 5. VALIDAR CHAVE
+# ============================================================
+
+def validar_chave_snapshot(
+    df,
+    nome_snapshot
+):
+
+    duplicados = df[
+        df['UID_IDPMTS']
+        .duplicated(keep=False)
+    ]
+
+    if not duplicados.empty:
+
+        exemplos = (
+            duplicados['UID_IDPMTS']
+            .dropna()
+            .drop_duplicates()
+            .head(10)
+            .tolist()
+        )
+
+        raise ValueError(
+            f'Existem UID_IDPMTS duplicados no snapshot '
+            f'{nome_snapshot}. Exemplos: {exemplos}'
+        )
+
+
+# ============================================================
+# 6. COMPARAÇÃO SEGURA DE VALORES
+# ============================================================
+
+def valores_diferentes(
+    serie_anterior,
+    serie_atual
+):
+
+    """
+    Regras:
+
+    vazio x vazio = não mudou
+    vazio x valor = mudou
+    valor x vazio = mudou
+    valor A x valor B = mudou se A != B
+    """
+
+    anterior_vazio = (
+        serie_anterior.isna()
+    )
+
+    atual_vazio = (
+        serie_atual.isna()
+    )
+
+    ambos_vazios = (
+        anterior_vazio
+        &
+        atual_vazio
+    )
+
+    return (
+        serie_anterior.ne(
+            serie_atual
+        )
+        &
+        ~ambos_vazios
+    )
+
+
+# ============================================================
+# 7. NORMALIZAÇÃO DOS CAMPOS DE PROJETO
+# ============================================================
+
+def normalizar_valor_projeto(valor):
+
+    """
+    Normaliza campos de projeto compostos por itens
+    separados por "/".
+
+    Exemplos equivalentes:
+
+    MARKETING/PROJETO 5G
+    PROJETO 5G/MARKETING
+
+    COBERTURA-QUALIDADE/REGULATÓRIO
+    REGULATÓRIO/COBERTURA-QUALIDADE
+
+    Também remove:
+    - espaços extras;
+    - diferença entre maiúsculas e minúsculas;
+    - itens repetidos.
+    """
+
+    if pd.isna(valor):
+        return None
+
+    texto = str(valor).strip()
+
+    if texto == '':
+        return None
+
+    partes = [
+        parte.strip().upper()
+        for parte in texto.split('/')
+        if parte.strip()
+    ]
+
+    # Remove repetições e ignora a ordem
+    partes_normalizadas = sorted(
+        set(partes)
+    )
+
+    if not partes_normalizadas:
+        return None
+
+    return '/'.join(
+        partes_normalizadas
+    )
+
+
+# ============================================================
+# 8. COMPARAÇÃO POR TIPO DE CAMPO
+# ============================================================
+
+def comparar_campo_monitorado(
+    serie_anterior,
+    serie_atual,
+    campo
+):
+
+    """
+    Para campos de projeto:
+    ignora a ordem dos itens separados por "/".
+
+    Para datas, escopo e rollout:
+    mantém a comparação normal.
+    """
+
+    if campo in COLUNAS_PROJETO_MONITORADAS:
+
+        anterior_normalizado = (
+            serie_anterior.apply(
+                normalizar_valor_projeto
+            )
+        )
+
+        atual_normalizado = (
+            serie_atual.apply(
+                normalizar_valor_projeto
+            )
+        )
+
+        return valores_diferentes(
+            anterior_normalizado,
+            atual_normalizado
+        )
+
+    return valores_diferentes(
+        serie_anterior,
+        serie_atual
+    )
+
+
+# ============================================================
+# 9. FORMATAR VALORES PARA SAÍDA
+# ============================================================
+
+def formatar_valor_saida(valor):
+
+    if pd.isna(valor):
+        return None
+
+    if isinstance(
+        valor,
+        (pd.Timestamp, datetime)
+    ):
+
+        return valor.strftime(
+            '%Y-%m-%d'
+        )
+
+    return str(valor)
+
+
+# ============================================================
+# 10. CLASSIFICAR TIPO DA ALTERAÇÃO
+# ============================================================
+
+def classificar_tipo_mudanca(campo):
+
+    mapa = {
+
+        'ENG_OBJ_MACRO':
+            'PROJETO_ALTERADO',
+
+        'MASTEROBRA_OBJ_ENG':
+            'PROJETO_ALTERADO',
+
+        'PMO_PROJETO':
+            'PROJETO_ALTERADO',
+
+        'PMO_REFERENCIA_REPORT':
+            'PROJETO_ALTERADO',
+
+        'REGIONAL_BASELINE_ATIVACAO':
+            'BASELINE_REGIONAL_ALTERADA',
+
+        'PMO_CARIMBO_BASELINE':
+            'CARIMBO_BASELINE_ALTERADO',
+
+        'PMO_CARIMBO_CENTRALIZADO':
+            'CARIMBO_CENTRALIZADO_ALTERADO',
+
+        'PMO_ESCOPO_META':
+            'ESCOPO_META_ALTERADO',
+
+        'PMO_ROLLOUT_OVBK':
+            'ROLLOUT_OVBK_ALTERADO',
+    }
+
+    return mapa.get(
+        campo,
+        'CAMPO_ALTERADO'
+    )
+
+
+# ============================================================
+# 11. IDENTIFICAR NOVAS E REMOVIDAS
+# ============================================================
+
+def identificar_novas_e_removidas(
+    anterior,
+    atual
+):
+
+    ids_anteriores = set(
+        anterior['UID_IDPMTS']
+        .dropna()
+        .unique()
+    )
+
+    ids_atuais = set(
+        atual['UID_IDPMTS']
+        .dropna()
+        .unique()
+    )
+
+    ids_novos = (
+        ids_atuais
+        -
+        ids_anteriores
+    )
+
+    ids_removidos = (
+        ids_anteriores
+        -
+        ids_atuais
+    )
+
+    obras_novas = atual[
+        atual['UID_IDPMTS']
+        .isin(ids_novos)
+    ].copy()
+
+    obras_removidas = anterior[
+        anterior['UID_IDPMTS']
+        .isin(ids_removidos)
+    ].copy()
+
+    obras_novas[
+        'TIPO_REGISTRO'
+    ] = 'NOVA_OBRA'
+
+    obras_removidas[
+        'TIPO_REGISTRO'
+    ] = 'OBRA_REMOVIDA'
+
+    return (
+        obras_novas,
+        obras_removidas,
+        ids_novos,
+        ids_removidos
+    )
+
+
+# ============================================================
+# 12. JUNTAR OS DOIS SNAPSHOTS
+# ============================================================
+
+def juntar_snapshots(
+    anterior,
+    atual
+):
+
+    colunas_anteriores = [
+        coluna
+        for coluna in COLUNAS_CONTEXTO
+        if coluna in anterior.columns
+    ]
+
+    colunas_atuais = [
+        coluna
+        for coluna in COLUNAS_CONTEXTO
+        if coluna in atual.columns
+    ]
+
+    base_anterior = anterior[
+        colunas_anteriores
+    ].copy()
+
+    base_atual = atual[
+        colunas_atuais
+    ].copy()
+
+    comparacao = base_anterior.merge(
+        base_atual,
+        on='UID_IDPMTS',
+        how='inner',
+        suffixes=(
+            '_ANTERIOR',
+            '_ATUAL'
+        ),
+        validate='one_to_one'
+    )
+
+    return comparacao
+
+
+# ============================================================
+# 13. CRIAR CHANGELOG POR CAMPO ALTERADO
+# ============================================================
+
+def criar_changelog_alteracoes(
+    comparacao,
+    data_anterior,
+    data_atual
+):
+
+    alteracoes = []
+
+    for campo in COLUNAS_MONITORADAS:
+
+        coluna_anterior = (
+            f'{campo}_ANTERIOR'
+        )
+
+        coluna_atual = (
+            f'{campo}_ATUAL'
+        )
+
+        if (
+            coluna_anterior not in comparacao.columns
+            or
+            coluna_atual not in comparacao.columns
+        ):
+
+            print(
+                f'ATENÇÃO: campo {campo} '
+                f'não encontrado nos dois snapshots.'
+            )
+
+            continue
+
+        # Proteção contra mudança somente de ordem
+        # nos campos de projeto
+        mascara = comparar_campo_monitorado(
+            comparacao[coluna_anterior],
+            comparacao[coluna_atual],
+            campo
+        )
+
+        linhas_alteradas = comparacao[
+            mascara
+        ].copy()
+
+        for _, linha in linhas_alteradas.iterrows():
+
+            alteracoes.append({
+
+                'DATA_SNAPSHOT_ANTERIOR':
+                    data_anterior,
+
+                'DATA_SNAPSHOT_ATUAL':
+                    data_atual,
+
+                'DATA_DETECCAO':
+                    pd.Timestamp.now(),
+
+                'TIPO_REGISTRO':
+                    'ALTERADO',
+
+                'TIPO_MUDANCA':
+                    classificar_tipo_mudanca(
+                        campo
+                    ),
+
+                'CAMPO_ALTERADO':
+                    campo,
+
+                # Os valores originais continuam no relatório
+                'VALOR_ANTERIOR':
+                    formatar_valor_saida(
+                        linha[coluna_anterior]
+                    ),
+
+                'VALOR_ATUAL':
+                    formatar_valor_saida(
+                        linha[coluna_atual]
+                    ),
+
+                'UID_IDPMTS':
+                    linha['UID_IDPMTS'],
+
+                'UID_IDENG':
+                    linha.get(
+                        'UID_IDENG_ATUAL'
+                    ),
+
+                'UID_UFSIGLA':
+                    linha.get(
+                        'UID_UFSIGLA_ATUAL'
+                    ),
+
+                'PMO_REGIONAL':
+                    linha.get(
+                        'PMO_REGIONAL_ATUAL'
+                    ),
+
+                'PMO_UF':
+                    linha.get(
+                        'PMO_UF_ATUAL'
+                    ),
+
+                'COMPETENCIA_ANTERIOR':
+                    linha.get(
+                        'COMPETENCIA_ANTERIOR'
+                    ),
+
+                'COMPETENCIA_ATUAL':
+                    linha.get(
+                        'COMPETENCIA_ATUAL'
+                    ),
+
+                'FLAG_SN_ANTERIOR':
+                    linha.get(
+                        'FLAG_SN_ANTERIOR'
+                    ),
+
+                'FLAG_SN_ATUAL':
+                    linha.get(
+                        'FLAG_SN_ATUAL'
+                    ),
+
+                'FLAG_AMPLIACAO_FISICA_ANTERIOR':
+                    linha.get(
+                        'FLAG_AMPLIACAO_FISICA_ANTERIOR'
+                    ),
+
+                'FLAG_AMPLIACAO_FISICA_ATUAL':
+                    linha.get(
+                        'FLAG_AMPLIACAO_FISICA_ATUAL'
+                    ),
+
+                'FLAG_AMPLIACAO_LOGICA_ANTERIOR':
+                    linha.get(
+                        'FLAG_AMPLIACAO_LOGICA_ANTERIOR'
+                    ),
+
+                'FLAG_AMPLIACAO_LOGICA_ATUAL':
+                    linha.get(
+                        'FLAG_AMPLIACAO_LOGICA_ATUAL'
+                    ),
+            })
+
+    return pd.DataFrame(
+        alteracoes
+    )
+
+
+# ============================================================
+# 14. EVENTOS DE NOVAS E REMOVIDAS
+# ============================================================
+
+def criar_eventos_novas_removidas(
+    obras_novas,
+    obras_removidas,
+    data_anterior,
+    data_atual
+):
+
+    eventos = []
+
+    # --------------------------------------------------------
+    # Novas obras
+    # --------------------------------------------------------
+
+    for _, linha in obras_novas.iterrows():
+
+        eventos.append({
+
+            'DATA_SNAPSHOT_ANTERIOR':
+                data_anterior,
+
+            'DATA_SNAPSHOT_ATUAL':
+                data_atual,
+
+            'DATA_DETECCAO':
+                pd.Timestamp.now(),
+
+            'TIPO_REGISTRO':
+                'NOVA_OBRA',
+
+            'TIPO_MUDANCA':
+                'NOVA_OBRA',
+
+            'CAMPO_ALTERADO':
+                None,
+
+            'VALOR_ANTERIOR':
+                None,
+
+            'VALOR_ATUAL':
+                'OBRA PRESENTE',
+
+            'UID_IDPMTS':
+                linha.get(
+                    'UID_IDPMTS'
+                ),
+
+            'UID_IDENG':
+                linha.get(
+                    'UID_IDENG'
+                ),
+
+            'UID_UFSIGLA':
+                linha.get(
+                    'UID_UFSIGLA'
+                ),
+
+            'PMO_REGIONAL':
+                linha.get(
+                    'PMO_REGIONAL'
+                ),
+
+            'PMO_UF':
+                linha.get(
+                    'PMO_UF'
+                ),
+
+            'COMPETENCIA_ANTERIOR':
+                None,
+
+            'COMPETENCIA_ATUAL':
+                linha.get(
+                    'COMPETENCIA'
+                ),
+
+            'FLAG_SN_ANTERIOR':
+                None,
+
+            'FLAG_SN_ATUAL':
+                linha.get(
+                    'FLAG_SN'
+                ),
+
+            'FLAG_AMPLIACAO_FISICA_ANTERIOR':
+                None,
+
+            'FLAG_AMPLIACAO_FISICA_ATUAL':
+                linha.get(
+                    'FLAG_AMPLIACAO_FISICA'
+                ),
+
+            'FLAG_AMPLIACAO_LOGICA_ANTERIOR':
+                None,
+
+            'FLAG_AMPLIACAO_LOGICA_ATUAL':
+                linha.get(
+                    'FLAG_AMPLIACAO_LOGICA'
+                ),
+        })
+
+    # --------------------------------------------------------
+    # Obras removidas
+    # --------------------------------------------------------
+
+    for _, linha in obras_removidas.iterrows():
+
+        eventos.append({
+
+            'DATA_SNAPSHOT_ANTERIOR':
+                data_anterior,
+
+            'DATA_SNAPSHOT_ATUAL':
+                data_atual,
+
+            'DATA_DETECCAO':
+                pd.Timestamp.now(),
+
+            'TIPO_REGISTRO':
+                'OBRA_REMOVIDA',
+
+            'TIPO_MUDANCA':
+                'OBRA_REMOVIDA',
+
+            'CAMPO_ALTERADO':
+                None,
+
+            'VALOR_ANTERIOR':
+                'OBRA PRESENTE',
+
+            'VALOR_ATUAL':
+                None,
+
+            'UID_IDPMTS':
+                linha.get(
+                    'UID_IDPMTS'
+                ),
+
+            'UID_IDENG':
+                linha.get(
+                    'UID_IDENG'
+                ),
+
+            'UID_UFSIGLA':
+                linha.get(
+                    'UID_UFSIGLA'
+                ),
+
+            'PMO_REGIONAL':
+                linha.get(
+                    'PMO_REGIONAL'
+                ),
+
+            'PMO_UF':
+                linha.get(
+                    'PMO_UF'
+                ),
+
+            'COMPETENCIA_ANTERIOR':
+                linha.get(
+                    'COMPETENCIA'
+                ),
+
+            'COMPETENCIA_ATUAL':
+                None,
+
+            'FLAG_SN_ANTERIOR':
+                linha.get(
+                    'FLAG_SN'
+                ),
+
+            'FLAG_SN_ATUAL':
+                None,
+
+            'FLAG_AMPLIACAO_FISICA_ANTERIOR':
+                linha.get(
+                    'FLAG_AMPLIACAO_FISICA'
+                ),
+
+            'FLAG_AMPLIACAO_FISICA_ATUAL':
+                None,
+
+            'FLAG_AMPLIACAO_LOGICA_ANTERIOR':
+                linha.get(
+                    'FLAG_AMPLIACAO_LOGICA'
+                ),
+
+            'FLAG_AMPLIACAO_LOGICA_ATUAL':
+                None,
+        })
+
+    return pd.DataFrame(
+        eventos
+    )
+
+
+# ============================================================
+# 15. INTERPRETAR TRANSIÇÃO DE FLAG
+# ============================================================
+
+def interpretar_transicao_flag(
+    valor_anterior,
+    valor_atual,
+    indicador
+):
+
+    anterior = bool(
+        valor_anterior
+    )
+
+    atual = bool(
+        valor_atual
+    )
+
+    if (
+        not anterior
+        and
+        atual
+    ):
+
+        return (
+            f'ENTROU_{indicador}'
+        )
+
+    if (
+        anterior
+        and
+        not atual
+    ):
+
+        return (
+            f'SAIU_{indicador}'
+        )
+
+    if (
+        anterior
+        and
+        atual
+    ):
+
+        return (
+            f'PERMANECEU_{indicador}'
+        )
+
+    return (
+        f'FORA_{indicador}'
+    )
+
+
+# ============================================================
+# 16. INTERPRETAR ROLLOUT
+# ============================================================
+
+def interpretar_rollout(
+    valor_anterior,
+    valor_atual
+):
+
+    anterior = (
+        str(valor_anterior)
+        .strip()
+        .upper()
+        if pd.notna(valor_anterior)
+        else None
+    )
+
+    atual = (
+        str(valor_atual)
+        .strip()
+        .upper()
+        if pd.notna(valor_atual)
+        else None
+    )
+
+    if (
+        anterior == 'ORCAMENTO'
+        and
+        atual != 'ORCAMENTO'
+    ):
+
+        return (
+            'SAIU_DO_ESCOPO_ORCAMENTO'
+        )
+
+    if (
+        anterior != 'ORCAMENTO'
+        and
+        atual == 'ORCAMENTO'
+    ):
+
+        return (
+            'ENTROU_NO_ESCOPO_ORCAMENTO'
+        )
+
+    return None
+
+
+# ============================================================
+# 17. INTERPRETAR ESCOPO META
+# ============================================================
+
+def interpretar_escopo_meta(
+    valor_anterior,
+    valor_atual
+):
+
+    anterior = (
+        str(valor_anterior)
+        .strip()
+        .upper()
+        if pd.notna(valor_anterior)
+        else None
+    )
+
+    atual = (
+        str(valor_atual)
+        .strip()
+        .upper()
+        if pd.notna(valor_atual)
+        else None
+    )
+
+    if (
+        anterior == 'FÍSICA'
+        and
+        atual != 'FÍSICA'
+    ):
+
+        return (
+            'SAIU_DO_ESCOPO_FISICA'
+        )
+
+    if (
+        anterior != 'FÍSICA'
+        and
+        atual == 'FÍSICA'
+    ):
+
+        return (
+            'ENTROU_NO_ESCOPO_FISICA'
+        )
+
+    if (
+        anterior == 'LÓGICA'
+        and
+        atual != 'LÓGICA'
+    ):
+
+        return (
+            'SAIU_DO_ESCOPO_LOGICA'
+        )
+
+    if (
+        anterior != 'LÓGICA'
+        and
+        atual == 'LÓGICA'
+    ):
+
+        return (
+            'ENTROU_NO_ESCOPO_LOGICA'
+        )
+
+    return None
+
+
+# ============================================================
+# 18. CRIAR TABELA CONSOLIDADA DE IMPACTO
+# ============================================================
+
+def criar_tabela_impacto(
+    comparacao,
+    changelog_alteracoes,
+    data_anterior,
+    data_atual
+):
+
+    if changelog_alteracoes.empty:
+
+        return pd.DataFrame()
+
+    ids_alterados = (
+        changelog_alteracoes[
+            'UID_IDPMTS'
+        ]
+        .dropna()
+        .unique()
+    )
+
+    base = comparacao[
+        comparacao['UID_IDPMTS']
+        .isin(ids_alterados)
+    ].copy()
+
+    resultados = []
+
+    for _, linha in base.iterrows():
+
+        idpmts = linha[
+            'UID_IDPMTS'
+        ]
+
+        alteracoes_obra = changelog_alteracoes[
+            changelog_alteracoes[
+                'UID_IDPMTS'
+            ].eq(idpmts)
+        ]
+
+        campos_alterados = (
+            alteracoes_obra[
+                'CAMPO_ALTERADO'
+            ]
+            .dropna()
+            .tolist()
+        )
+
+        projetos_alterados = [
+            campo
+            for campo in campos_alterados
+            if campo in COLUNAS_PROJETO_MONITORADAS
+        ]
+
+        datas_alteradas = [
+            campo
+            for campo in campos_alterados
+            if campo in COLUNAS_DATA_MONITORADAS
+        ]
+
+        competencia_anterior = linha.get(
+            'COMPETENCIA_ANTERIOR'
+        )
+
+        competencia_atual = linha.get(
+            'COMPETENCIA_ATUAL'
+        )
+
+        mudou_competencia = (
+            (
+                pd.notna(
+                    competencia_anterior
+                )
+                or
+                pd.notna(
+                    competencia_atual
+                )
+            )
+            and
+            (
+                competencia_anterior
+                !=
+                competencia_atual
+            )
+        )
+
+        if mudou_competencia:
+
+            impacto_temporal = (
+                f'SAIU DE {competencia_anterior} / '
+                f'ENTROU EM {competencia_atual}'
+            )
+
+        else:
+
+            impacto_temporal = None
+
+        rollout_anterior = linha.get(
+            'PMO_ROLLOUT_OVBK_ANTERIOR'
+        )
+
+        rollout_atual = linha.get(
+            'PMO_ROLLOUT_OVBK_ATUAL'
+        )
+
+        escopo_anterior = linha.get(
+            'PMO_ESCOPO_META_ANTERIOR'
+        )
+
+        escopo_atual = linha.get(
+            'PMO_ESCOPO_META_ATUAL'
+        )
+
+        resultados.append({
+
+            'DATA_SNAPSHOT_ANTERIOR':
+                data_anterior,
+
+            'DATA_SNAPSHOT_ATUAL':
+                data_atual,
+
+            'DATA_DETECCAO':
+                pd.Timestamp.now(),
+
+            'UID_IDPMTS':
+                idpmts,
+
+            'UID_IDENG':
+                linha.get(
+                    'UID_IDENG_ATUAL'
+                ),
+
+            'UID_UFSIGLA':
+                linha.get(
+                    'UID_UFSIGLA_ATUAL'
+                ),
+
+            'PMO_REGIONAL':
+                linha.get(
+                    'PMO_REGIONAL_ATUAL'
+                ),
+
+            'PMO_UF':
+                linha.get(
+                    'PMO_UF_ATUAL'
+                ),
+
+            'QUANTIDADE_CAMPOS_ALTERADOS':
+                len(
+                    campos_alterados
+                ),
+
+            'CAMPOS_ALTERADOS':
+                ' | '.join(
+                    campos_alterados
+                ),
+
+            'PROJETOS_ALTERADOS':
+                ' | '.join(
+                    projetos_alterados
+                ),
+
+            'DATAS_ALTERADAS':
+                ' | '.join(
+                    datas_alteradas
+                ),
+
+            'MUDOU_PROJETO':
+                len(
+                    projetos_alterados
+                ) > 0,
+
+            'MUDOU_DATA':
+                len(
+                    datas_alteradas
+                ) > 0,
+
+            'COMPETENCIA_ANTERIOR':
+                competencia_anterior,
+
+            'COMPETENCIA_ATUAL':
+                competencia_atual,
+
+            'MUDOU_COMPETENCIA':
+                mudou_competencia,
+
+            'IMPACTO_TEMPORAL':
+                impacto_temporal,
+
+            'ESCOPO_META_ANTERIOR':
+                escopo_anterior,
+
+            'ESCOPO_META_ATUAL':
+                escopo_atual,
+
+            'IMPACTO_ESCOPO_META':
+                interpretar_escopo_meta(
+                    escopo_anterior,
+                    escopo_atual
+                ),
+
+            'ROLLOUT_OVBK_ANTERIOR':
+                rollout_anterior,
+
+            'ROLLOUT_OVBK_ATUAL':
+                rollout_atual,
+
+            'IMPACTO_ROLLOUT_OVBK':
+                interpretar_rollout(
+                    rollout_anterior,
+                    rollout_atual
+                ),
+
+            'FLAG_SN_ANTERIOR':
+                linha.get(
+                    'FLAG_SN_ANTERIOR'
+                ),
+
+            'FLAG_SN_ATUAL':
+                linha.get(
+                    'FLAG_SN_ATUAL'
+                ),
+
+            'IMPACTO_SN':
+                interpretar_transicao_flag(
+                    linha.get(
+                        'FLAG_SN_ANTERIOR'
+                    ),
+                    linha.get(
+                        'FLAG_SN_ATUAL'
+                    ),
+                    'SN'
+                ),
+
+            'FLAG_AF_ANTERIOR':
+                linha.get(
+                    'FLAG_AMPLIACAO_FISICA_ANTERIOR'
+                ),
+
+            'FLAG_AF_ATUAL':
+                linha.get(
+                    'FLAG_AMPLIACAO_FISICA_ATUAL'
+                ),
+
+            'IMPACTO_AMPLIACAO_FISICA':
+                interpretar_transicao_flag(
+                    linha.get(
+                        'FLAG_AMPLIACAO_FISICA_ANTERIOR'
+                    ),
+                    linha.get(
+                        'FLAG_AMPLIACAO_FISICA_ATUAL'
+                    ),
+                    'AMPLIACAO_FISICA'
+                ),
+
+            'FLAG_AL_ANTERIOR':
+                linha.get(
+                    'FLAG_AMPLIACAO_LOGICA_ANTERIOR'
+                ),
+
+            'FLAG_AL_ATUAL':
+                linha.get(
+                    'FLAG_AMPLIACAO_LOGICA_ATUAL'
+                ),
+
+            'IMPACTO_AMPLIACAO_LOGICA':
+                interpretar_transicao_flag(
+                    linha.get(
+                        'FLAG_AMPLIACAO_LOGICA_ANTERIOR'
+                    ),
+                    linha.get(
+                        'FLAG_AMPLIACAO_LOGICA_ATUAL'
+                    ),
+                    'AMPLIACAO_LOGICA'
+                ),
+        })
+
+    return pd.DataFrame(
+        resultados
+    )
+
+
+# ============================================================
+# 19. CRIAR RESUMO DA COMPARAÇÃO
+# ============================================================
+
+def criar_resumo_comparacao(
+    anterior,
+    atual,
+    obras_novas,
+    obras_removidas,
+    changelog,
+    impacto
+):
+
+    if changelog.empty:
+
+        alterados = pd.DataFrame()
+
+    else:
+
+        alterados = changelog[
+            changelog[
+                'TIPO_REGISTRO'
+            ].eq('ALTERADO')
+        ]
+
+    dados = [
+
+        {
+            'METRICA':
+                'Snapshot anterior',
+
+            'VALOR':
+                anterior[
+                    'DATA_SNAPSHOT'
+                ].iloc[0]
+        },
+
+        {
+            'METRICA':
+                'Snapshot atual',
+
+            'VALOR':
+                atual[
+                    'DATA_SNAPSHOT'
+                ].iloc[0]
+        },
+
+        {
+            'METRICA':
+                'Obras no snapshot anterior',
+
+            'VALOR':
+                anterior[
+                    'UID_IDPMTS'
+                ].nunique()
+        },
+
+        {
+            'METRICA':
+                'Obras no snapshot atual',
+
+            'VALOR':
+                atual[
+                    'UID_IDPMTS'
+                ].nunique()
+        },
+
+        {
+            'METRICA':
+                'Novas obras',
+
+            'VALOR':
+                obras_novas[
+                    'UID_IDPMTS'
+                ].nunique()
+        },
+
+        {
+            'METRICA':
+                'Obras removidas',
+
+            'VALOR':
+                obras_removidas[
+                    'UID_IDPMTS'
+                ].nunique()
+        },
+
+        {
+            'METRICA':
+                'Obras com campo alterado',
+
+            'VALOR':
+                (
+                    alterados[
+                        'UID_IDPMTS'
+                    ].nunique()
+                    if not alterados.empty
+                    else 0
+                )
+        },
+
+        {
+            'METRICA':
+                'Total de campos alterados',
+
+            'VALOR':
+                len(
+                    alterados
+                )
+        },
+
+        {
+            'METRICA':
+                'Obras com mudança de competência',
+
+            'VALOR':
+                (
+                    impacto.loc[
+                        impacto[
+                            'MUDOU_COMPETENCIA'
+                        ].eq(True),
+                        'UID_IDPMTS'
+                    ].nunique()
+                    if not impacto.empty
+                    else 0
+                )
+        },
+
+        {
+            'METRICA':
+                'Obras que mudaram projeto',
+
+            'VALOR':
+                (
+                    impacto.loc[
+                        impacto[
+                            'MUDOU_PROJETO'
+                        ].eq(True),
+                        'UID_IDPMTS'
+                    ].nunique()
+                    if not impacto.empty
+                    else 0
+                )
+        },
+
+        {
+            'METRICA':
+                'Obras que mudaram escopo meta',
+
+            'VALOR':
+                (
+                    changelog.loc[
+                        changelog[
+                            'CAMPO_ALTERADO'
+                        ].eq(
+                            'PMO_ESCOPO_META'
+                        ),
+                        'UID_IDPMTS'
+                    ].nunique()
+                    if not changelog.empty
+                    else 0
+                )
+        },
+
+        {
+            'METRICA':
+                'Obras que mudaram rollout/overbooking',
+
+            'VALOR':
+                (
+                    changelog.loc[
+                        changelog[
+                            'CAMPO_ALTERADO'
+                        ].eq(
+                            'PMO_ROLLOUT_OVBK'
+                        ),
+                        'UID_IDPMTS'
+                    ].nunique()
+                    if not changelog.empty
+                    else 0
+                )
+        },
+
+        {
+            'METRICA':
+                'Obras que saíram de SN',
+
+            'VALOR':
+                (
+                    impacto.loc[
+                        impacto[
+                            'IMPACTO_SN'
+                        ].eq(
+                            'SAIU_SN'
+                        ),
+                        'UID_IDPMTS'
+                    ].nunique()
+                    if not impacto.empty
+                    else 0
+                )
+        },
+
+        {
+            'METRICA':
+                'Obras que entraram em SN',
+
+            'VALOR':
+                (
+                    impacto.loc[
+                        impacto[
+                            'IMPACTO_SN'
+                        ].eq(
+                            'ENTROU_SN'
+                        ),
+                        'UID_IDPMTS'
+                    ].nunique()
+                    if not impacto.empty
+                    else 0
+                )
+        },
+    ]
+
+    return pd.DataFrame(
+        dados
+    )
+
+
+# ============================================================
+# 20. VERIFICAR SE A COMPARAÇÃO JÁ FOI SALVA
+# ============================================================
+
+def comparacao_ja_processada(
+    data_atual
+):
+
+    try:
+
+        historico_changelog = c.read_sql(
+            DATABASE_HISTORICO,
+            TABELA_CHANGELOG,
+            BANCO_HISTORICO,
+            colunas='DATA_SNAPSHOT_ATUAL'
+        )
+
+        if historico_changelog.empty:
+            return False
+
+        historico_changelog[
+            'DATA_SNAPSHOT_ATUAL'
+        ] = pd.to_datetime(
+            historico_changelog[
+                'DATA_SNAPSHOT_ATUAL'
+            ],
+            errors='coerce'
+        )
+
+        return (
+            historico_changelog[
+                'DATA_SNAPSHOT_ATUAL'
+            ]
+            .dt.normalize()
+            .eq(
+                pd.Timestamp(
+                    data_atual
+                ).normalize()
+            )
+            .any()
+        )
+
+    except Exception:
+
+        # A tabela ainda não existe
+        return False
+
+
+# ============================================================
+# 21. SALVAR RESULTADOS NO BANCO
+# ============================================================
+
+def salvar_resultados_banco(
+    changelog,
+    impacto,
+    data_atual,
+    force=False
+):
+
+    if (
+        comparacao_ja_processada(
+            data_atual
+        )
+        and
+        not force
+    ):
+
+        print(
+            '\nATENÇÃO: essa comparação '
+            'já foi processada.'
+        )
+
+        print(
+            'Nada foi adicionado novamente.'
+        )
+
+        return False
+
+    if not changelog.empty:
+
+        c.to_sql(
+            changelog,
+            DATABASE_HISTORICO,
+            TABELA_CHANGELOG,
+            BANCO_HISTORICO,
+            normalize=True,
+            existente='append'
+        )
+
+        print(
+            'Changelog salvo no banco.'
+        )
+
+    else:
+
+        print(
+            'Changelog vazio: '
+            'nenhuma alteração para salvar.'
+        )
+
+    if not impacto.empty:
+
+        c.to_sql(
+            impacto,
+            DATABASE_HISTORICO,
+            TABELA_IMPACTO,
+            BANCO_HISTORICO,
+            normalize=True,
+            existente='append'
+        )
+
+        print(
+            'Tabela de impacto salva no banco.'
+        )
+
+    else:
+
+        print(
+            'Tabela de impacto vazia: '
+            'nenhum impacto para salvar.'
+        )
+
+    return True
+
+
+# ============================================================
+# 22. EXPORTAR EXCEL
+# ============================================================
+
+def exportar_excel_comparacao(
+    resumo,
+    changelog,
+    impacto,
+    obras_novas,
+    obras_removidas,
+    data_atual
+):
+
+    data_texto = pd.Timestamp(
+        data_atual
+    ).strftime('%Y%m%d')
+
+    arquivo = (
+        PASTA_SAIDA_COMPARACAO
+        /
+        f'comparacao_pmts_{data_texto}.xlsx'
+    )
+
+    # --------------------------------------------------------
+    # Mudanças de competência
+    # --------------------------------------------------------
+
+    if not impacto.empty:
+
+        mudancas_competencia = impacto[
+            impacto[
+                'MUDOU_COMPETENCIA'
+            ].eq(True)
+        ].copy()
+
+    else:
+
+        mudancas_competencia = (
+            pd.DataFrame()
+        )
+
+    # --------------------------------------------------------
+    # Mudanças reais de projeto
+    # --------------------------------------------------------
+
+    if not impacto.empty:
+
+        mudancas_projeto = impacto[
+            impacto[
+                'MUDOU_PROJETO'
+            ].eq(True)
+        ].copy()
+
+    else:
+
+        mudancas_projeto = (
+            pd.DataFrame()
+        )
+
+    # --------------------------------------------------------
+    # Escopo e rollout
+    # --------------------------------------------------------
+
+    if not changelog.empty:
+
+        mudancas_escopo = changelog[
+            changelog[
+                'CAMPO_ALTERADO'
+            ].isin([
+                'PMO_ESCOPO_META',
+                'PMO_ROLLOUT_OVBK'
+            ])
+        ].copy()
+
+    else:
+
+        mudancas_escopo = (
+            pd.DataFrame()
+        )
+
+    # --------------------------------------------------------
+    # Apenas alterações de projeto no formato detalhado
+    # --------------------------------------------------------
+
+    if not changelog.empty:
+
+        changelog_projetos = changelog[
+            changelog[
+                'CAMPO_ALTERADO'
+            ].isin(
+                COLUNAS_PROJETO_MONITORADAS
+            )
+        ].copy()
+
+    else:
+
+        changelog_projetos = (
+            pd.DataFrame()
+        )
+
+    # --------------------------------------------------------
+    # Apenas alterações de datas
+    # --------------------------------------------------------
+
+    if not changelog.empty:
+
+        changelog_datas = changelog[
+            changelog[
+                'CAMPO_ALTERADO'
+            ].isin(
+                COLUNAS_DATA_MONITORADAS
+            )
+        ].copy()
+
+    else:
+
+        changelog_datas = (
+            pd.DataFrame()
+        )
+
+    with pd.ExcelWriter(
+        arquivo,
+        engine='openpyxl',
+        datetime_format='dd/mm/yyyy'
+    ) as writer:
+
+        resumo.to_excel(
+            writer,
+            sheet_name='Resumo',
+            index=False
+        )
+
+        changelog.to_excel(
+            writer,
+            sheet_name='Changelog',
+            index=False
+        )
+
+        impacto.to_excel(
+            writer,
+            sheet_name='Impacto',
+            index=False
+        )
+
+        obras_novas.to_excel(
+            writer,
+            sheet_name='Novas Obras',
+            index=False
+        )
+
+        obras_removidas.to_excel(
+            writer,
+            sheet_name='Obras Removidas',
+            index=False
+        )
+
+        mudancas_competencia.to_excel(
+            writer,
+            sheet_name='Mudança Competência',
+            index=False
+        )
+
+        mudancas_projeto.to_excel(
+            writer,
+            sheet_name='Mudança Projeto',
+            index=False
+        )
+
+        changelog_projetos.to_excel(
+            writer,
+            sheet_name='Projetos Detalhado',
+            index=False
+        )
+
+        changelog_datas.to_excel(
+            writer,
+            sheet_name='Datas Alteradas',
+            index=False
+        )
+
+        mudancas_escopo.to_excel(
+            writer,
+            sheet_name='Escopo e Rollout',
+            index=False
+        )
+
+    print(
+        f'\nExcel criado: {arquivo}'
+    )
+
+
+# ============================================================
+# 23. EXECUÇÃO
+# ============================================================
+
+print(
+    '\n========================================'
+)
+
+print(
+    'COMPARAÇÃO DOS SNAPSHOTS PMTS'
+)
+
+print(
+    '========================================\n'
+)
+
+
+# ------------------------------------------------------------
+# 1. Ler histórico
+# ------------------------------------------------------------
+
+historico = ler_historico_snapshot()
+
+
+# ------------------------------------------------------------
+# 2. Tratar histórico
+# ------------------------------------------------------------
+
+historico = tratar_historico(
+    historico
+)
+
+
+# ------------------------------------------------------------
+# 3. Selecionar os dois últimos snapshots
+# ------------------------------------------------------------
+
+(
+    snapshot_anterior,
+    snapshot_atual,
+    data_snapshot_anterior,
+    data_snapshot_atual
+
+) = selecionar_dois_ultimos_snapshots(
+    historico
+)
+
+
+# ------------------------------------------------------------
+# 4. Novas e removidas
+# ------------------------------------------------------------
+
+(
+    obras_novas,
+    obras_removidas,
+    ids_novos,
+    ids_removidos
+
+) = identificar_novas_e_removidas(
+    snapshot_anterior,
+    snapshot_atual
+)
+
+
+# ------------------------------------------------------------
+# 5. Obras existentes nos dois snapshots
+# ------------------------------------------------------------
+
+comparacao_snapshots = juntar_snapshots(
+    snapshot_anterior,
+    snapshot_atual
+)
+
+
+# ------------------------------------------------------------
+# 6. Alterações reais por campo
+# ------------------------------------------------------------
+
+changelog_alteracoes = (
+    criar_changelog_alteracoes(
+        comparacao_snapshots,
+        data_snapshot_anterior,
+        data_snapshot_atual
+    )
+)
+
+
+# ------------------------------------------------------------
+# 7. Eventos de novas e removidas
+# ------------------------------------------------------------
+
+eventos_novas_removidas = (
+    criar_eventos_novas_removidas(
+        obras_novas,
+        obras_removidas,
+        data_snapshot_anterior,
+        data_snapshot_atual
+    )
+)
+
+
+# ------------------------------------------------------------
+# 8. Changelog final
+# ------------------------------------------------------------
+
+partes_changelog = [
+    dataframe
+    for dataframe in [
+        changelog_alteracoes,
+        eventos_novas_removidas
+    ]
+    if not dataframe.empty
+]
+
+
+if partes_changelog:
+
+    changelog = pd.concat(
+        partes_changelog,
+        ignore_index=True
+    )
+
+else:
+
+    changelog = pd.DataFrame()
+
+
+# ------------------------------------------------------------
+# 9. Impacto consolidado
+# ------------------------------------------------------------
+
+impacto = criar_tabela_impacto(
+    comparacao_snapshots,
+    changelog_alteracoes,
+    data_snapshot_anterior,
+    data_snapshot_atual
+)
+
+
+# ------------------------------------------------------------
+# 10. Resumo
+# ------------------------------------------------------------
+
+resumo_comparacao = (
+    criar_resumo_comparacao(
+        snapshot_anterior,
+        snapshot_atual,
+        obras_novas,
+        obras_removidas,
+        changelog,
+        impacto
+    )
+)
+
+
+# ============================================================
+# RESULTADOS NA TELA
+# ============================================================
+
+print(
+    '\n========== RESUMO =========='
+)
+
+display(
+    resumo_comparacao
+)
+
+
+print(
+    '\n========== ALTERAÇÕES =========='
+)
+
+if not changelog.empty:
+
+    display(
+        changelog.head(50)
+    )
+
+else:
+
+    print(
+        'Nenhuma alteração encontrada.'
+    )
+
+
+print(
+    '\n========== IMPACTOS =========='
+)
+
+if not impacto.empty:
+
+    display(
+        impacto.head(50)
+    )
+
+else:
+
+    print(
+        'Nenhum impacto encontrado.'
+    )
+
+
+# ============================================================
+# EXPORTAR EXCEL
+# ============================================================
+
+if EXPORTAR_EXCEL_COMPARACAO:
+
+    exportar_excel_comparacao(
+        resumo_comparacao,
+        changelog,
+        impacto,
+        obras_novas,
+        obras_removidas,
+        data_snapshot_atual
+    )
+
+
+# ============================================================
+# SALVAR NO BANCO
+# ============================================================
+
+if SALVAR_NO_BANCO:
+
+    salvar_resultados_banco(
+        changelog,
+        impacto,
+        data_snapshot_atual
+    )
+
+else:
+
+    print(
+        '\nSALVAR_NO_BANCO está False.'
+    )
+
+    print(
+        'Valide o Excel e depois altere para True.'
+    )
+
+
+print(
+    '\nComparação concluída.'
+)
