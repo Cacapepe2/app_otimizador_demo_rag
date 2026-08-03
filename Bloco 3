@@ -1,0 +1,1570 @@
+
+# ============================================================
+# BLOCO 3 - COMPARAÇÃO DOS DOIS ÚLTIMOS SNAPSHOTS
+# Captura mudanças de campos, novas/removidas e transições:
+# SITE NOVO <-> AMPLIAÇÃO FÍSICA/LÓGICA
+# ============================================================
+
+from Conntomysql import Conntomysql
+
+import pandas as pd
+from datetime import datetime
+from pathlib import Path
+
+
+# ============================================================
+# CONEXÃO E CONFIGURAÇÕES
+# ============================================================
+
+c = Conntomysql()
+
+BANCO_HISTORICO = 'prod'
+DATABASE_HISTORICO = 'cadastro'
+
+TABELA_SNAPSHOT = 'pmts_observabilidade_snapshot'
+TABELA_CHANGELOG = 'pmts_observabilidade_changelog'
+TABELA_IMPACTO = 'pmts_observabilidade_impacto'
+
+SALVAR_NO_BANCO = False
+EXPORTAR_EXCEL = True
+
+PASTA_SAIDA = Path('.')
+
+
+# ============================================================
+# CAMPOS MONITORADOS
+# ============================================================
+
+COLUNAS_PROJETO_MONITORADAS = [
+    'ENG_OBJ_MACRO',
+    'MASTEROBRA_OBJ_ENG',
+    'PMO_PROJETO',
+    'PMO_REFERENCIA_REPORT',
+]
+
+COLUNAS_DATA_MONITORADAS = [
+    'REGIONAL_BASELINE_ATIVACAO',
+    'PMO_CARIMBO_BASELINE',
+    'PMO_CARIMBO_CENTRALIZADO',
+]
+
+COLUNAS_CLASSIFICACAO_MONITORADAS = [
+    'PMO_TIPO_INTERV',
+    'PMO_ESCOPO_META',
+    'PMO_ROLLOUT_OVBK',
+    'MASTERSITE_COBERTURA',
+    'MASTEROBRA_STATUS_ROLLOUT',
+]
+
+COLUNAS_MONITORADAS = (
+    COLUNAS_PROJETO_MONITORADAS
+    + COLUNAS_DATA_MONITORADAS
+    + COLUNAS_CLASSIFICACAO_MONITORADAS
+)
+
+COLUNAS_FLAG_MONITORADAS = [
+    'FLAG_SN',
+    'FLAG_AMPLIACAO_FISICA',
+    'FLAG_AMPLIACAO_LOGICA',
+    'FLAG_ATIVO_EAP',
+    'FLAG_ATIVO_VALID',
+]
+
+COLUNAS_CONTEXTO = [
+    'UID_IDPMTS',
+    'UID_IDENG',
+    'UID_UFSIGLA',
+    'PMO_REGIONAL',
+    'PMO_UF',
+
+    'ENG_OBJ_MACRO',
+    'MASTEROBRA_OBJ_ENG',
+    'PMO_PROJETO',
+    'PMO_REFERENCIA_REPORT',
+
+    'REGIONAL_BASELINE_ATIVACAO',
+    'PMO_CARIMBO_BASELINE',
+    'PMO_CARIMBO_CENTRALIZADO',
+    'COMPETENCIA',
+
+    'PMO_TIPO_INTERV',
+    'PMO_ESCOPO_META',
+    'PMO_ROLLOUT_OVBK',
+    'MASTERSITE_COBERTURA',
+    'MASTEROBRA_STATUS_ROLLOUT',
+
+    'FLAG_SN',
+    'FLAG_AMPLIACAO_FISICA',
+    'FLAG_AMPLIACAO_LOGICA',
+    'FLAG_ATIVO_EAP',
+    'FLAG_ATIVO_VALID',
+]
+
+COLUNAS_LEITURA = list(
+    dict.fromkeys([
+        'DATA_SNAPSHOT',
+        'DATA_HORA_CARGA',
+        *COLUNAS_CONTEXTO,
+    ])
+)
+
+COLUNAS_CHANGELOG = [
+    'DATA_SNAPSHOT_ANTERIOR',
+    'DATA_SNAPSHOT_ATUAL',
+    'DATA_DETECCAO',
+    'TIPO_REGISTRO',
+    'TIPO_MUDANCA',
+    'CAMPO_ALTERADO',
+    'VALOR_ANTERIOR',
+    'VALOR_ATUAL',
+
+    'UID_IDPMTS',
+    'UID_IDENG',
+    'UID_UFSIGLA',
+    'PMO_REGIONAL',
+    'PMO_UF',
+
+    'COMPETENCIA_ANTERIOR',
+    'COMPETENCIA_ATUAL',
+
+    'CLASSIFICACAO_ANTERIOR',
+    'CLASSIFICACAO_ATUAL',
+    'TRANSICAO_CLASSIFICACAO',
+    'SAIU_SN_PARA_AMPLIACAO',
+
+    'FLAG_SN_ANTERIOR',
+    'FLAG_SN_ATUAL',
+    'FLAG_AMPLIACAO_FISICA_ANTERIOR',
+    'FLAG_AMPLIACAO_FISICA_ATUAL',
+    'FLAG_AMPLIACAO_LOGICA_ANTERIOR',
+    'FLAG_AMPLIACAO_LOGICA_ATUAL',
+]
+
+
+# ============================================================
+# NORMALIZAÇÕES
+# ============================================================
+
+def normalizar_booleano(serie):
+    texto = (
+        serie.astype('string')
+        .str.strip()
+        .str.upper()
+    )
+
+    mapa = {
+        'TRUE': True,
+        'FALSE': False,
+        '1': True,
+        '0': False,
+        'T': True,
+        'F': False,
+        'SIM': True,
+        'NÃO': False,
+        'NAO': False,
+        'S': True,
+        'N': False,
+    }
+
+    return texto.map(mapa).fillna(False).astype(bool)
+
+
+def normalizar_texto(valor):
+    if pd.isna(valor):
+        return None
+
+    texto = str(valor).strip().upper()
+
+    if texto == '':
+        return None
+
+    return texto
+
+
+def normalizar_valor_projeto(valor):
+    """
+    Ignora apenas:
+    - ordem dos itens separados por /
+    - espaços
+    - maiúsculas/minúsculas
+    - itens repetidos
+
+    Exemplo:
+    MARKETING/PROJETO 5G
+    PROJETO 5G/MARKETING
+    são considerados iguais.
+    """
+
+    if pd.isna(valor):
+        return None
+
+    partes = [
+        parte.strip().upper()
+        for parte in str(valor).split('/')
+        if parte.strip()
+    ]
+
+    if not partes:
+        return None
+
+    return '/'.join(sorted(set(partes)))
+
+
+def normalizar_data(valor):
+    if pd.isna(valor):
+        return pd.NaT
+
+    return pd.to_datetime(valor, errors='coerce').normalize()
+
+
+# ============================================================
+# LEITURA E TRATAMENTO DO HISTÓRICO
+# ============================================================
+
+def ler_historico_snapshot():
+    print('Lendo histórico de snapshots...')
+
+    historico = c.read_sql(
+        DATABASE_HISTORICO,
+        TABELA_SNAPSHOT,
+        BANCO_HISTORICO,
+        colunas=', '.join(COLUNAS_LEITURA)
+    )
+
+    if historico.empty:
+        raise ValueError('A tabela histórica está vazia.')
+
+    print(f'{len(historico):,} linhas carregadas.')
+
+    return historico
+
+
+def tratar_historico(historico):
+    df = historico.copy()
+
+    for coluna in [
+        'DATA_SNAPSHOT',
+        'DATA_HORA_CARGA',
+        *COLUNAS_DATA_MONITORADAS,
+    ]:
+        if coluna in df.columns:
+            df[coluna] = pd.to_datetime(
+                df[coluna],
+                errors='coerce'
+            )
+
+    df['DATA_SNAPSHOT'] = (
+        df['DATA_SNAPSHOT']
+        .dt.normalize()
+    )
+
+    for coluna in [
+        'UID_IDPMTS',
+        'UID_IDENG',
+        'UID_UFSIGLA',
+    ]:
+        if coluna in df.columns:
+            df[coluna] = (
+                df[coluna]
+                .astype('string')
+                .str.strip()
+                .str.upper()
+            )
+
+    for coluna in COLUNAS_FLAG_MONITORADAS:
+        if coluna in df.columns:
+            df[coluna] = normalizar_booleano(df[coluna])
+
+    return df
+
+
+def validar_chave_snapshot(df, nome_snapshot):
+    nulos = df['UID_IDPMTS'].isna().sum()
+
+    if nulos > 0:
+        raise ValueError(
+            f'O snapshot {nome_snapshot} possui '
+            f'{nulos} linhas sem UID_IDPMTS.'
+        )
+
+    duplicados = df[
+        df['UID_IDPMTS'].duplicated(keep=False)
+    ]
+
+    if not duplicados.empty:
+        exemplos = (
+            duplicados['UID_IDPMTS']
+            .drop_duplicates()
+            .head(10)
+            .tolist()
+        )
+
+        raise ValueError(
+            f'Existem UID_IDPMTS duplicados no snapshot '
+            f'{nome_snapshot}. Exemplos: {exemplos}'
+        )
+
+
+def selecionar_dois_ultimos_snapshots(historico):
+    datas = (
+        historico['DATA_SNAPSHOT']
+        .dropna()
+        .drop_duplicates()
+        .sort_values()
+        .tolist()
+    )
+
+    if len(datas) < 2:
+        raise ValueError(
+            'São necessários pelo menos dois dias de snapshot.'
+        )
+
+    data_anterior = datas[-2]
+    data_atual = datas[-1]
+
+    anterior = historico[
+        historico['DATA_SNAPSHOT'].eq(data_anterior)
+    ].copy()
+
+    atual = historico[
+        historico['DATA_SNAPSHOT'].eq(data_atual)
+    ].copy()
+
+    validar_chave_snapshot(anterior, 'ANTERIOR')
+    validar_chave_snapshot(atual, 'ATUAL')
+
+    print(
+        '\nSnapshot anterior:',
+        pd.Timestamp(data_anterior).strftime('%d/%m/%Y')
+    )
+    print(
+        'Snapshot atual:',
+        pd.Timestamp(data_atual).strftime('%d/%m/%Y')
+    )
+    print('Obras no anterior:', anterior['UID_IDPMTS'].nunique())
+    print('Obras no atual:', atual['UID_IDPMTS'].nunique())
+
+    return anterior, atual, data_anterior, data_atual
+
+
+# ============================================================
+# NOVAS, REMOVIDAS E MERGE
+# ============================================================
+
+def identificar_novas_e_removidas(anterior, atual):
+    ids_anteriores = set(
+        anterior['UID_IDPMTS'].dropna().unique()
+    )
+    ids_atuais = set(
+        atual['UID_IDPMTS'].dropna().unique()
+    )
+
+    ids_novos = ids_atuais - ids_anteriores
+    ids_removidos = ids_anteriores - ids_atuais
+
+    obras_novas = atual[
+        atual['UID_IDPMTS'].isin(ids_novos)
+    ].copy()
+
+    obras_removidas = anterior[
+        anterior['UID_IDPMTS'].isin(ids_removidos)
+    ].copy()
+
+    obras_novas['TIPO_REGISTRO'] = 'NOVA_OBRA'
+    obras_removidas['TIPO_REGISTRO'] = 'OBRA_REMOVIDA'
+
+    return obras_novas, obras_removidas
+
+
+def juntar_snapshots(anterior, atual):
+    colunas_anterior = [
+        coluna
+        for coluna in COLUNAS_CONTEXTO
+        if coluna in anterior.columns
+    ]
+    colunas_atual = [
+        coluna
+        for coluna in COLUNAS_CONTEXTO
+        if coluna in atual.columns
+    ]
+
+    return anterior[colunas_anterior].merge(
+        atual[colunas_atual],
+        on='UID_IDPMTS',
+        how='inner',
+        suffixes=('_ANTERIOR', '_ATUAL'),
+        validate='one_to_one'
+    )
+
+
+# ============================================================
+# CLASSIFICAÇÃO DOS INDICADORES
+# ============================================================
+
+def identificar_classificacao(linha, momento):
+    classificacoes = []
+
+    if bool(linha.get(f'FLAG_SN_{momento}', False)):
+        classificacoes.append('SITE NOVO')
+
+    if bool(
+        linha.get(
+            f'FLAG_AMPLIACAO_FISICA_{momento}',
+            False
+        )
+    ):
+        classificacoes.append('AMPLIAÇÃO FÍSICA')
+
+    if bool(
+        linha.get(
+            f'FLAG_AMPLIACAO_LOGICA_{momento}',
+            False
+        )
+    ):
+        classificacoes.append('AMPLIAÇÃO LÓGICA')
+
+    if not classificacoes:
+        return 'FORA DOS 3 INDICADORES'
+
+    return ' + '.join(classificacoes)
+
+
+def eh_transicao_sn_para_ampliacao(
+    classificacao_anterior,
+    classificacao_atual
+):
+    return (
+        classificacao_anterior == 'SITE NOVO'
+        and classificacao_atual in {
+            'AMPLIAÇÃO FÍSICA',
+            'AMPLIAÇÃO LÓGICA',
+        }
+    )
+
+
+def adicionar_classificacoes_comparacao(comparacao):
+    resultado = comparacao.copy()
+
+    resultado['CLASSIFICACAO_ANTERIOR'] = resultado.apply(
+        lambda linha: identificar_classificacao(
+            linha,
+            'ANTERIOR'
+        ),
+        axis=1
+    )
+
+    resultado['CLASSIFICACAO_ATUAL'] = resultado.apply(
+        lambda linha: identificar_classificacao(
+            linha,
+            'ATUAL'
+        ),
+        axis=1
+    )
+
+    resultado['MUDOU_CLASSIFICACAO'] = (
+        resultado['CLASSIFICACAO_ANTERIOR']
+        .ne(resultado['CLASSIFICACAO_ATUAL'])
+    )
+
+    resultado['TRANSICAO_CLASSIFICACAO'] = (
+        resultado['CLASSIFICACAO_ANTERIOR']
+        + ' → '
+        + resultado['CLASSIFICACAO_ATUAL']
+    )
+
+    resultado['SAIU_SN_PARA_AMPLIACAO'] = resultado.apply(
+        lambda linha: eh_transicao_sn_para_ampliacao(
+            linha['CLASSIFICACAO_ANTERIOR'],
+            linha['CLASSIFICACAO_ATUAL']
+        ),
+        axis=1
+    )
+
+    return resultado
+
+
+# ============================================================
+# COMPARAÇÃO DOS CAMPOS
+# ============================================================
+
+def valores_diferentes(
+    serie_anterior,
+    serie_atual
+):
+    ambos_nulos = (
+        serie_anterior.isna()
+        &
+        serie_atual.isna()
+    )
+
+    iguais = (
+        serie_anterior.eq(serie_atual)
+        .fillna(False)
+    )
+
+    return ~(ambos_nulos | iguais)
+
+
+def comparar_campo_monitorado(
+    serie_anterior,
+    serie_atual,
+    campo
+):
+    if campo in COLUNAS_PROJETO_MONITORADAS:
+        anterior_normalizado = (
+            serie_anterior.apply(normalizar_valor_projeto)
+        )
+        atual_normalizado = (
+            serie_atual.apply(normalizar_valor_projeto)
+        )
+
+        return valores_diferentes(
+            anterior_normalizado,
+            atual_normalizado
+        )
+
+    if campo in COLUNAS_CLASSIFICACAO_MONITORADAS:
+        anterior_normalizado = (
+            serie_anterior.apply(normalizar_texto)
+        )
+        atual_normalizado = (
+            serie_atual.apply(normalizar_texto)
+        )
+
+        return valores_diferentes(
+            anterior_normalizado,
+            atual_normalizado
+        )
+
+    if campo in COLUNAS_DATA_MONITORADAS:
+        anterior_normalizado = (
+            serie_anterior.apply(normalizar_data)
+        )
+        atual_normalizado = (
+            serie_atual.apply(normalizar_data)
+        )
+
+        return valores_diferentes(
+            anterior_normalizado,
+            atual_normalizado
+        )
+
+    return valores_diferentes(
+        serie_anterior,
+        serie_atual
+    )
+
+
+def formatar_valor_saida(valor):
+    if pd.isna(valor):
+        return None
+
+    if isinstance(valor, (pd.Timestamp, datetime)):
+        return valor.strftime('%Y-%m-%d')
+
+    return str(valor)
+
+
+def classificar_tipo_mudanca(campo):
+    mapa = {
+        'ENG_OBJ_MACRO': 'PROJETO_ALTERADO',
+        'MASTEROBRA_OBJ_ENG': 'PROJETO_ALTERADO',
+        'PMO_PROJETO': 'PROJETO_ALTERADO',
+        'PMO_REFERENCIA_REPORT': 'PROJETO_ALTERADO',
+
+        'REGIONAL_BASELINE_ATIVACAO':
+            'BASELINE_REGIONAL_ALTERADA',
+
+        'PMO_CARIMBO_BASELINE':
+            'CARIMBO_BASELINE_ALTERADO',
+
+        'PMO_CARIMBO_CENTRALIZADO':
+            'CARIMBO_CENTRALIZADO_ALTERADO',
+
+        'PMO_TIPO_INTERV':
+            'TIPO_INTERVENCAO_ALTERADO',
+
+        'PMO_ESCOPO_META':
+            'ESCOPO_META_ALTERADO',
+
+        'PMO_ROLLOUT_OVBK':
+            'ROLLOUT_OVBK_ALTERADO',
+
+        'MASTERSITE_COBERTURA':
+            'COBERTURA_ALTERADA',
+
+        'MASTEROBRA_STATUS_ROLLOUT':
+            'STATUS_ROLLOUT_ALTERADO',
+    }
+
+    return mapa.get(campo, 'CAMPO_ALTERADO')
+
+
+def dados_contexto_changelog(
+    linha,
+    data_anterior,
+    data_atual
+):
+    classificacao_anterior = linha.get(
+        'CLASSIFICACAO_ANTERIOR'
+    )
+    classificacao_atual = linha.get(
+        'CLASSIFICACAO_ATUAL'
+    )
+
+    return {
+        'DATA_SNAPSHOT_ANTERIOR': data_anterior,
+        'DATA_SNAPSHOT_ATUAL': data_atual,
+        'DATA_DETECCAO': pd.Timestamp.now(),
+
+        'UID_IDPMTS': linha.get('UID_IDPMTS'),
+        'UID_IDENG': linha.get('UID_IDENG_ATUAL'),
+        'UID_UFSIGLA': linha.get('UID_UFSIGLA_ATUAL'),
+        'PMO_REGIONAL': linha.get('PMO_REGIONAL_ATUAL'),
+        'PMO_UF': linha.get('PMO_UF_ATUAL'),
+
+        'COMPETENCIA_ANTERIOR':
+            linha.get('COMPETENCIA_ANTERIOR'),
+
+        'COMPETENCIA_ATUAL':
+            linha.get('COMPETENCIA_ATUAL'),
+
+        'CLASSIFICACAO_ANTERIOR':
+            classificacao_anterior,
+
+        'CLASSIFICACAO_ATUAL':
+            classificacao_atual,
+
+        'TRANSICAO_CLASSIFICACAO':
+            linha.get('TRANSICAO_CLASSIFICACAO'),
+
+        'SAIU_SN_PARA_AMPLIACAO':
+            eh_transicao_sn_para_ampliacao(
+                classificacao_anterior,
+                classificacao_atual
+            ),
+
+        'FLAG_SN_ANTERIOR':
+            linha.get('FLAG_SN_ANTERIOR'),
+
+        'FLAG_SN_ATUAL':
+            linha.get('FLAG_SN_ATUAL'),
+
+        'FLAG_AMPLIACAO_FISICA_ANTERIOR':
+            linha.get(
+                'FLAG_AMPLIACAO_FISICA_ANTERIOR'
+            ),
+
+        'FLAG_AMPLIACAO_FISICA_ATUAL':
+            linha.get(
+                'FLAG_AMPLIACAO_FISICA_ATUAL'
+            ),
+
+        'FLAG_AMPLIACAO_LOGICA_ANTERIOR':
+            linha.get(
+                'FLAG_AMPLIACAO_LOGICA_ANTERIOR'
+            ),
+
+        'FLAG_AMPLIACAO_LOGICA_ATUAL':
+            linha.get(
+                'FLAG_AMPLIACAO_LOGICA_ATUAL'
+            ),
+    }
+
+
+# ============================================================
+# CHANGELOG DE CAMPOS ALTERADOS
+# ============================================================
+
+def criar_changelog_campos(
+    comparacao,
+    data_anterior,
+    data_atual
+):
+    alteracoes = []
+
+    for campo in COLUNAS_MONITORADAS:
+        coluna_anterior = f'{campo}_ANTERIOR'
+        coluna_atual = f'{campo}_ATUAL'
+
+        if (
+            coluna_anterior not in comparacao.columns
+            or coluna_atual not in comparacao.columns
+        ):
+            print(
+                f'ATENÇÃO: {campo} não foi encontrado '
+                f'nos dois snapshots.'
+            )
+            continue
+
+        mascara = comparar_campo_monitorado(
+            comparacao[coluna_anterior],
+            comparacao[coluna_atual],
+            campo
+        )
+
+        for _, linha in comparacao[mascara].iterrows():
+            registro = dados_contexto_changelog(
+                linha,
+                data_anterior,
+                data_atual
+            )
+
+            registro.update({
+                'TIPO_REGISTRO': 'ALTERADO',
+                'TIPO_MUDANCA':
+                    classificar_tipo_mudanca(campo),
+                'CAMPO_ALTERADO': campo,
+                'VALOR_ANTERIOR':
+                    formatar_valor_saida(
+                        linha[coluna_anterior]
+                    ),
+                'VALOR_ATUAL':
+                    formatar_valor_saida(
+                        linha[coluna_atual]
+                    ),
+            })
+
+            alteracoes.append(registro)
+
+    return pd.DataFrame(
+        alteracoes,
+        columns=COLUNAS_CHANGELOG
+    )
+
+
+# ============================================================
+# CHANGELOG EXPLÍCITO DE CLASSIFICAÇÃO
+# ============================================================
+
+def criar_changelog_classificacao(
+    comparacao,
+    data_anterior,
+    data_atual
+):
+    mudancas = comparacao[
+        comparacao['MUDOU_CLASSIFICACAO']
+    ].copy()
+
+    registros = []
+
+    for _, linha in mudancas.iterrows():
+        registro = dados_contexto_changelog(
+            linha,
+            data_anterior,
+            data_atual
+        )
+
+        registro.update({
+            'TIPO_REGISTRO': 'ALTERADO',
+            'TIPO_MUDANCA':
+                'CLASSIFICACAO_INDICADOR_ALTERADA',
+            'CAMPO_ALTERADO':
+                'CLASSIFICACAO_INDICADOR',
+            'VALOR_ANTERIOR':
+                linha['CLASSIFICACAO_ANTERIOR'],
+            'VALOR_ATUAL':
+                linha['CLASSIFICACAO_ATUAL'],
+        })
+
+        registros.append(registro)
+
+    return pd.DataFrame(
+        registros,
+        columns=COLUNAS_CHANGELOG
+    )
+
+
+# ============================================================
+# CHANGELOG DE NOVAS E REMOVIDAS
+# ============================================================
+
+def classificacao_snapshot(linha):
+    classificacoes = []
+
+    if bool(linha.get('FLAG_SN', False)):
+        classificacoes.append('SITE NOVO')
+
+    if bool(
+        linha.get('FLAG_AMPLIACAO_FISICA', False)
+    ):
+        classificacoes.append('AMPLIAÇÃO FÍSICA')
+
+    if bool(
+        linha.get('FLAG_AMPLIACAO_LOGICA', False)
+    ):
+        classificacoes.append('AMPLIAÇÃO LÓGICA')
+
+    return (
+        ' + '.join(classificacoes)
+        if classificacoes
+        else 'FORA DOS 3 INDICADORES'
+    )
+
+
+def criar_eventos_novas_removidas(
+    obras_novas,
+    obras_removidas,
+    data_anterior,
+    data_atual
+):
+    registros = []
+
+    for _, linha in obras_novas.iterrows():
+        classificacao_atual = classificacao_snapshot(linha)
+
+        registros.append({
+            'DATA_SNAPSHOT_ANTERIOR': data_anterior,
+            'DATA_SNAPSHOT_ATUAL': data_atual,
+            'DATA_DETECCAO': pd.Timestamp.now(),
+            'TIPO_REGISTRO': 'NOVA_OBRA',
+            'TIPO_MUDANCA': 'NOVA_OBRA',
+            'CAMPO_ALTERADO': None,
+            'VALOR_ANTERIOR': None,
+            'VALOR_ATUAL': 'OBRA PRESENTE',
+
+            'UID_IDPMTS': linha.get('UID_IDPMTS'),
+            'UID_IDENG': linha.get('UID_IDENG'),
+            'UID_UFSIGLA': linha.get('UID_UFSIGLA'),
+            'PMO_REGIONAL': linha.get('PMO_REGIONAL'),
+            'PMO_UF': linha.get('PMO_UF'),
+
+            'COMPETENCIA_ANTERIOR': None,
+            'COMPETENCIA_ATUAL':
+                linha.get('COMPETENCIA'),
+
+            'CLASSIFICACAO_ANTERIOR':
+                'OBRA NÃO EXISTIA',
+
+            'CLASSIFICACAO_ATUAL':
+                classificacao_atual,
+
+            'TRANSICAO_CLASSIFICACAO':
+                f'OBRA NÃO EXISTIA → {classificacao_atual}',
+
+            'SAIU_SN_PARA_AMPLIACAO': False,
+
+            'FLAG_SN_ANTERIOR': None,
+            'FLAG_SN_ATUAL':
+                linha.get('FLAG_SN'),
+
+            'FLAG_AMPLIACAO_FISICA_ANTERIOR': None,
+            'FLAG_AMPLIACAO_FISICA_ATUAL':
+                linha.get('FLAG_AMPLIACAO_FISICA'),
+
+            'FLAG_AMPLIACAO_LOGICA_ANTERIOR': None,
+            'FLAG_AMPLIACAO_LOGICA_ATUAL':
+                linha.get('FLAG_AMPLIACAO_LOGICA'),
+        })
+
+    for _, linha in obras_removidas.iterrows():
+        classificacao_anterior = classificacao_snapshot(linha)
+
+        registros.append({
+            'DATA_SNAPSHOT_ANTERIOR': data_anterior,
+            'DATA_SNAPSHOT_ATUAL': data_atual,
+            'DATA_DETECCAO': pd.Timestamp.now(),
+            'TIPO_REGISTRO': 'OBRA_REMOVIDA',
+            'TIPO_MUDANCA': 'OBRA_REMOVIDA',
+            'CAMPO_ALTERADO': None,
+            'VALOR_ANTERIOR': 'OBRA PRESENTE',
+            'VALOR_ATUAL': None,
+
+            'UID_IDPMTS': linha.get('UID_IDPMTS'),
+            'UID_IDENG': linha.get('UID_IDENG'),
+            'UID_UFSIGLA': linha.get('UID_UFSIGLA'),
+            'PMO_REGIONAL': linha.get('PMO_REGIONAL'),
+            'PMO_UF': linha.get('PMO_UF'),
+
+            'COMPETENCIA_ANTERIOR':
+                linha.get('COMPETENCIA'),
+
+            'COMPETENCIA_ATUAL': None,
+
+            'CLASSIFICACAO_ANTERIOR':
+                classificacao_anterior,
+
+            'CLASSIFICACAO_ATUAL':
+                'OBRA REMOVIDA',
+
+            'TRANSICAO_CLASSIFICACAO':
+                f'{classificacao_anterior} → OBRA REMOVIDA',
+
+            'SAIU_SN_PARA_AMPLIACAO': False,
+
+            'FLAG_SN_ANTERIOR':
+                linha.get('FLAG_SN'),
+
+            'FLAG_SN_ATUAL': None,
+
+            'FLAG_AMPLIACAO_FISICA_ANTERIOR':
+                linha.get('FLAG_AMPLIACAO_FISICA'),
+
+            'FLAG_AMPLIACAO_FISICA_ATUAL': None,
+
+            'FLAG_AMPLIACAO_LOGICA_ANTERIOR':
+                linha.get('FLAG_AMPLIACAO_LOGICA'),
+
+            'FLAG_AMPLIACAO_LOGICA_ATUAL': None,
+        })
+
+    return pd.DataFrame(
+        registros,
+        columns=COLUNAS_CHANGELOG
+    )
+
+
+# ============================================================
+# TABELA CONSOLIDADA DE IMPACTO
+# ============================================================
+
+def interpretar_rollout(anterior, atual):
+    anterior = normalizar_texto(anterior)
+    atual = normalizar_texto(atual)
+
+    if anterior == 'ORCAMENTO' and atual != 'ORCAMENTO':
+        return 'SAIU_DO_ESCOPO_ORCAMENTO'
+
+    if anterior != 'ORCAMENTO' and atual == 'ORCAMENTO':
+        return 'ENTROU_NO_ESCOPO_ORCAMENTO'
+
+    return None
+
+
+def interpretar_escopo_meta(anterior, atual):
+    anterior = normalizar_texto(anterior)
+    atual = normalizar_texto(atual)
+
+    if anterior == 'FÍSICA' and atual != 'FÍSICA':
+        return 'SAIU_DO_ESCOPO_FISICA'
+
+    if anterior != 'FÍSICA' and atual == 'FÍSICA':
+        return 'ENTROU_NO_ESCOPO_FISICA'
+
+    if anterior == 'LÓGICA' and atual != 'LÓGICA':
+        return 'SAIU_DO_ESCOPO_LOGICA'
+
+    if anterior != 'LÓGICA' and atual == 'LÓGICA':
+        return 'ENTROU_NO_ESCOPO_LOGICA'
+
+    return None
+
+
+def criar_tabela_impacto(
+    comparacao,
+    changelog_campos,
+    changelog_classificacao,
+    data_anterior,
+    data_atual
+):
+    ids = set()
+
+    if not changelog_campos.empty:
+        ids.update(
+            changelog_campos['UID_IDPMTS']
+            .dropna()
+            .unique()
+        )
+
+    if not changelog_classificacao.empty:
+        ids.update(
+            changelog_classificacao['UID_IDPMTS']
+            .dropna()
+            .unique()
+        )
+
+    if not ids:
+        return pd.DataFrame()
+
+    base = comparacao[
+        comparacao['UID_IDPMTS'].isin(ids)
+    ].copy()
+
+    resultados = []
+
+    for _, linha in base.iterrows():
+        idpmts = linha['UID_IDPMTS']
+
+        campos_obra = (
+            changelog_campos.loc[
+                changelog_campos['UID_IDPMTS'].eq(idpmts),
+                'CAMPO_ALTERADO'
+            ]
+            .dropna()
+            .tolist()
+            if not changelog_campos.empty
+            else []
+        )
+
+        projetos_alterados = [
+            campo
+            for campo in campos_obra
+            if campo in COLUNAS_PROJETO_MONITORADAS
+        ]
+
+        datas_alteradas = [
+            campo
+            for campo in campos_obra
+            if campo in COLUNAS_DATA_MONITORADAS
+        ]
+
+        competencia_anterior = linha.get(
+            'COMPETENCIA_ANTERIOR'
+        )
+        competencia_atual = linha.get(
+            'COMPETENCIA_ATUAL'
+        )
+
+        mudou_competencia = (
+            normalizar_texto(competencia_anterior)
+            != normalizar_texto(competencia_atual)
+        )
+
+        classificacao_anterior = linha[
+            'CLASSIFICACAO_ANTERIOR'
+        ]
+        classificacao_atual = linha[
+            'CLASSIFICACAO_ATUAL'
+        ]
+
+        resultados.append({
+            'DATA_SNAPSHOT_ANTERIOR': data_anterior,
+            'DATA_SNAPSHOT_ATUAL': data_atual,
+            'DATA_DETECCAO': pd.Timestamp.now(),
+
+            'UID_IDPMTS': idpmts,
+            'UID_IDENG': linha.get('UID_IDENG_ATUAL'),
+            'UID_UFSIGLA':
+                linha.get('UID_UFSIGLA_ATUAL'),
+            'PMO_REGIONAL':
+                linha.get('PMO_REGIONAL_ATUAL'),
+            'PMO_UF': linha.get('PMO_UF_ATUAL'),
+
+            'QUANTIDADE_CAMPOS_ALTERADOS':
+                len(campos_obra),
+
+            'CAMPOS_ALTERADOS':
+                ' | '.join(campos_obra),
+
+            'MUDOU_PROJETO':
+                len(projetos_alterados) > 0,
+
+            'PROJETOS_ALTERADOS':
+                ' | '.join(projetos_alterados),
+
+            'MUDOU_DATA':
+                len(datas_alteradas) > 0,
+
+            'DATAS_ALTERADAS':
+                ' | '.join(datas_alteradas),
+
+            'COMPETENCIA_ANTERIOR':
+                competencia_anterior,
+
+            'COMPETENCIA_ATUAL':
+                competencia_atual,
+
+            'MUDOU_COMPETENCIA':
+                mudou_competencia,
+
+            'PMO_TIPO_INTERV_ANTERIOR':
+                linha.get('PMO_TIPO_INTERV_ANTERIOR'),
+
+            'PMO_TIPO_INTERV_ATUAL':
+                linha.get('PMO_TIPO_INTERV_ATUAL'),
+
+            'ESCOPO_META_ANTERIOR':
+                linha.get('PMO_ESCOPO_META_ANTERIOR'),
+
+            'ESCOPO_META_ATUAL':
+                linha.get('PMO_ESCOPO_META_ATUAL'),
+
+            'IMPACTO_ESCOPO_META':
+                interpretar_escopo_meta(
+                    linha.get('PMO_ESCOPO_META_ANTERIOR'),
+                    linha.get('PMO_ESCOPO_META_ATUAL')
+                ),
+
+            'ROLLOUT_OVBK_ANTERIOR':
+                linha.get('PMO_ROLLOUT_OVBK_ANTERIOR'),
+
+            'ROLLOUT_OVBK_ATUAL':
+                linha.get('PMO_ROLLOUT_OVBK_ATUAL'),
+
+            'IMPACTO_ROLLOUT_OVBK':
+                interpretar_rollout(
+                    linha.get('PMO_ROLLOUT_OVBK_ANTERIOR'),
+                    linha.get('PMO_ROLLOUT_OVBK_ATUAL')
+                ),
+
+            'CLASSIFICACAO_ANTERIOR':
+                classificacao_anterior,
+
+            'CLASSIFICACAO_ATUAL':
+                classificacao_atual,
+
+            'MUDOU_CLASSIFICACAO':
+                classificacao_anterior
+                != classificacao_atual,
+
+            'TRANSICAO_CLASSIFICACAO':
+                linha['TRANSICAO_CLASSIFICACAO'],
+
+            'SAIU_SN_PARA_AMPLIACAO':
+                linha['SAIU_SN_PARA_AMPLIACAO'],
+
+            'FLAG_SN_ANTERIOR':
+                linha.get('FLAG_SN_ANTERIOR'),
+
+            'FLAG_SN_ATUAL':
+                linha.get('FLAG_SN_ATUAL'),
+
+            'FLAG_AMPLIACAO_FISICA_ANTERIOR':
+                linha.get(
+                    'FLAG_AMPLIACAO_FISICA_ANTERIOR'
+                ),
+
+            'FLAG_AMPLIACAO_FISICA_ATUAL':
+                linha.get(
+                    'FLAG_AMPLIACAO_FISICA_ATUAL'
+                ),
+
+            'FLAG_AMPLIACAO_LOGICA_ANTERIOR':
+                linha.get(
+                    'FLAG_AMPLIACAO_LOGICA_ANTERIOR'
+                ),
+
+            'FLAG_AMPLIACAO_LOGICA_ATUAL':
+                linha.get(
+                    'FLAG_AMPLIACAO_LOGICA_ATUAL'
+                ),
+        })
+
+    return pd.DataFrame(resultados)
+
+
+# ============================================================
+# RESUMO
+# ============================================================
+
+def contar_transicao(
+    transicoes,
+    anterior,
+    atual
+):
+    if transicoes.empty:
+        return 0
+
+    return transicoes.loc[
+        transicoes['CLASSIFICACAO_ANTERIOR'].eq(anterior)
+        &
+        transicoes['CLASSIFICACAO_ATUAL'].eq(atual),
+        'UID_IDPMTS'
+    ].nunique()
+
+
+def criar_resumo(
+    snapshot_anterior,
+    snapshot_atual,
+    obras_novas,
+    obras_removidas,
+    changelog_campos,
+    transicoes
+):
+    return pd.DataFrame([
+        {
+            'METRICA': 'Snapshot anterior',
+            'VALOR':
+                snapshot_anterior['DATA_SNAPSHOT'].iloc[0],
+        },
+        {
+            'METRICA': 'Snapshot atual',
+            'VALOR':
+                snapshot_atual['DATA_SNAPSHOT'].iloc[0],
+        },
+        {
+            'METRICA': 'Obras no snapshot anterior',
+            'VALOR':
+                snapshot_anterior['UID_IDPMTS'].nunique(),
+        },
+        {
+            'METRICA': 'Obras no snapshot atual',
+            'VALOR':
+                snapshot_atual['UID_IDPMTS'].nunique(),
+        },
+        {
+            'METRICA': 'Novas obras',
+            'VALOR':
+                obras_novas['UID_IDPMTS'].nunique(),
+        },
+        {
+            'METRICA': 'Obras removidas',
+            'VALOR':
+                obras_removidas['UID_IDPMTS'].nunique(),
+        },
+        {
+            'METRICA': 'Obras com campo alterado',
+            'VALOR':
+                changelog_campos['UID_IDPMTS'].nunique(),
+        },
+        {
+            'METRICA': 'Obras com mudança de classificação',
+            'VALOR':
+                transicoes['UID_IDPMTS'].nunique(),
+        },
+        {
+            'METRICA': 'Site Novo → Ampliação Física',
+            'VALOR':
+                contar_transicao(
+                    transicoes,
+                    'SITE NOVO',
+                    'AMPLIAÇÃO FÍSICA'
+                ),
+        },
+        {
+            'METRICA': 'Site Novo → Ampliação Lógica',
+            'VALOR':
+                contar_transicao(
+                    transicoes,
+                    'SITE NOVO',
+                    'AMPLIAÇÃO LÓGICA'
+                ),
+        },
+        {
+            'METRICA': 'Ampliação Física → Site Novo',
+            'VALOR':
+                contar_transicao(
+                    transicoes,
+                    'AMPLIAÇÃO FÍSICA',
+                    'SITE NOVO'
+                ),
+        },
+        {
+            'METRICA': 'Ampliação Lógica → Site Novo',
+            'VALOR':
+                contar_transicao(
+                    transicoes,
+                    'AMPLIAÇÃO LÓGICA',
+                    'SITE NOVO'
+                ),
+        },
+    ])
+
+
+# ============================================================
+# PROTEÇÃO CONTRA DUPLICAÇÃO NO BANCO
+# ============================================================
+
+def comparacao_ja_processada(data_atual):
+    try:
+        existente = c.read_sql(
+            DATABASE_HISTORICO,
+            TABELA_CHANGELOG,
+            BANCO_HISTORICO,
+            colunas='DATA_SNAPSHOT_ATUAL'
+        )
+
+        if existente.empty:
+            return False
+
+        datas = pd.to_datetime(
+            existente['DATA_SNAPSHOT_ATUAL'],
+            errors='coerce'
+        ).dt.normalize()
+
+        return datas.eq(
+            pd.Timestamp(data_atual).normalize()
+        ).any()
+
+    except Exception:
+        return False
+
+
+def salvar_no_banco(
+    changelog,
+    impacto,
+    data_atual,
+    force=False
+):
+    if (
+        comparacao_ja_processada(data_atual)
+        and not force
+    ):
+        print(
+            '\nEssa comparação já foi salva. '
+            'Nada foi inserido novamente.'
+        )
+        return False
+
+    if not changelog.empty:
+        c.to_sql(
+            changelog,
+            DATABASE_HISTORICO,
+            TABELA_CHANGELOG,
+            BANCO_HISTORICO,
+            normalize=True,
+            existente='append'
+        )
+        print(
+            f'Gravado em '
+            f'{DATABASE_HISTORICO}.{TABELA_CHANGELOG}'
+        )
+
+    if not impacto.empty:
+        c.to_sql(
+            impacto,
+            DATABASE_HISTORICO,
+            TABELA_IMPACTO,
+            BANCO_HISTORICO,
+            normalize=True,
+            existente='append'
+        )
+        print(
+            f'Gravado em '
+            f'{DATABASE_HISTORICO}.{TABELA_IMPACTO}'
+        )
+
+    return True
+
+
+# ============================================================
+# EXCEL
+# ============================================================
+
+def exportar_excel(
+    resumo,
+    changelog,
+    impacto,
+    obras_novas,
+    obras_removidas,
+    transicoes,
+    data_atual
+):
+    arquivo = (
+        PASTA_SAIDA
+        /
+        (
+            'comparacao_pmts_'
+            f'{pd.Timestamp(data_atual):%Y%m%d}.xlsx'
+        )
+    )
+
+    sn_para_ampliacao = transicoes[
+        transicoes['SAIU_SN_PARA_AMPLIACAO']
+    ].copy()
+
+    mudancas_projeto = changelog[
+        changelog['CAMPO_ALTERADO'].isin(
+            COLUNAS_PROJETO_MONITORADAS
+        )
+    ].copy()
+
+    mudancas_datas = changelog[
+        changelog['CAMPO_ALTERADO'].isin(
+            COLUNAS_DATA_MONITORADAS
+        )
+    ].copy()
+
+    mudancas_regras = changelog[
+        changelog['CAMPO_ALTERADO'].isin(
+            COLUNAS_CLASSIFICACAO_MONITORADAS
+        )
+    ].copy()
+
+    with pd.ExcelWriter(
+        arquivo,
+        engine='openpyxl',
+        datetime_format='dd/mm/yyyy'
+    ) as writer:
+        resumo.to_excel(
+            writer,
+            sheet_name='Resumo',
+            index=False
+        )
+        changelog.to_excel(
+            writer,
+            sheet_name='Changelog',
+            index=False
+        )
+        impacto.to_excel(
+            writer,
+            sheet_name='Impacto',
+            index=False
+        )
+        transicoes.to_excel(
+            writer,
+            sheet_name='Transições',
+            index=False
+        )
+        sn_para_ampliacao.to_excel(
+            writer,
+            sheet_name='SN para Ampliação',
+            index=False
+        )
+        obras_novas.to_excel(
+            writer,
+            sheet_name='Novas Obras',
+            index=False
+        )
+        obras_removidas.to_excel(
+            writer,
+            sheet_name='Obras Removidas',
+            index=False
+        )
+        mudancas_projeto.to_excel(
+            writer,
+            sheet_name='Mudanças Projeto',
+            index=False
+        )
+        mudancas_datas.to_excel(
+            writer,
+            sheet_name='Mudanças Datas',
+            index=False
+        )
+        mudancas_regras.to_excel(
+            writer,
+            sheet_name='Mudanças Regras',
+            index=False
+        )
+
+    print(f'\nExcel criado: {arquivo}')
+
+
+# ============================================================
+# EXECUÇÃO
+# ============================================================
+
+print('\n========================================')
+print('COMPARAÇÃO DOS SNAPSHOTS PMTS')
+print('========================================\n')
+
+historico = ler_historico_snapshot()
+historico = tratar_historico(historico)
+
+(
+    snapshot_anterior,
+    snapshot_atual,
+    data_snapshot_anterior,
+    data_snapshot_atual,
+) = selecionar_dois_ultimos_snapshots(historico)
+
+(
+    obras_novas,
+    obras_removidas,
+) = identificar_novas_e_removidas(
+    snapshot_anterior,
+    snapshot_atual
+)
+
+comparacao = juntar_snapshots(
+    snapshot_anterior,
+    snapshot_atual
+)
+
+comparacao = adicionar_classificacoes_comparacao(
+    comparacao
+)
+
+changelog_campos = criar_changelog_campos(
+    comparacao,
+    data_snapshot_anterior,
+    data_snapshot_atual
+)
+
+changelog_classificacao = (
+    criar_changelog_classificacao(
+        comparacao,
+        data_snapshot_anterior,
+        data_snapshot_atual
+    )
+)
+
+eventos_novas_removidas = (
+    criar_eventos_novas_removidas(
+        obras_novas,
+        obras_removidas,
+        data_snapshot_anterior,
+        data_snapshot_atual
+    )
+)
+
+partes_changelog = [
+    dataframe
+    for dataframe in [
+        changelog_campos,
+        changelog_classificacao,
+        eventos_novas_removidas,
+    ]
+    if not dataframe.empty
+]
+
+if partes_changelog:
+    changelog = pd.concat(
+        partes_changelog,
+        ignore_index=True
+    )
+else:
+    changelog = pd.DataFrame(
+        columns=COLUNAS_CHANGELOG
+    )
+
+transicoes_classificacao = (
+    changelog_classificacao.copy()
+)
+
+impacto = criar_tabela_impacto(
+    comparacao,
+    changelog_campos,
+    changelog_classificacao,
+    data_snapshot_anterior,
+    data_snapshot_atual
+)
+
+resumo = criar_resumo(
+    snapshot_anterior,
+    snapshot_atual,
+    obras_novas,
+    obras_removidas,
+    changelog_campos,
+    transicoes_classificacao
+)
+
+print('\n========== RESUMO ==========')
+display(resumo)
+
+print('\n========== SN PARA AMPLIAÇÃO ==========')
+display(
+    transicoes_classificacao[
+        transicoes_classificacao[
+            'SAIU_SN_PARA_AMPLIACAO'
+        ]
+    ]
+)
+
+print('\n========== TODAS AS TRANSIÇÕES ==========')
+display(transicoes_classificacao.head(50))
+
+if EXPORTAR_EXCEL:
+    exportar_excel(
+        resumo,
+        changelog,
+        impacto,
+        obras_novas,
+        obras_removidas,
+        transicoes_classificacao,
+        data_snapshot_atual
+    )
+
+if SALVAR_NO_BANCO:
+    salvar_no_banco(
+        changelog,
+        impacto,
+        data_snapshot_atual
+    )
+else:
+    print(
+        '\nSALVAR_NO_BANCO está False. '
+        'Valide o Excel e depois altere para True.'
+    )
+
+print('\nComparação concluída.')
