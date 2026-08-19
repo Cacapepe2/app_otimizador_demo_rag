@@ -1,3 +1,113 @@
+SITE_INFO_COLS_4G = [
+    "TECNOLOGIA",
+    "REGIONAL",
+    "UF",
+    "AREA",
+    "MUNICIPIO",
+    "SITE",
+    "BTS",
+]
+
+SITE_INFO_COLS_5G = [
+    "TECNOLOGIA",
+    "UF",
+    "SITE",
+    "BTS",
+]
+
+
+GROUP_COLS_4G = [
+    "SITE",
+    "SETOR",
+]
+
+GROUP_COLS_5G = [
+    "SITE",
+    "SETOR",
+    "CAT_BANDA",
+]
+
+KEY_4G = [
+    "DATA",
+    "SITE",
+    "SETOR",
+]
+
+KEY_5G = [
+    "DATA",
+    "SITE",
+    "SETOR",
+    "CAT_BANDA",
+]
+
+PERCENTAGE_COLS_4G = [
+    "ACESSIBILIDADE_DADOS_LTE",
+    "DISPONIBILIDADE_LTE",
+    "EFICIENCIA_CSFB_PREP_LTE",
+    "EFICIENCIA_ERAB_LTE",
+    "EFICIENCIA_HANDOVER_LTE",
+    "EFICIENCIA_HO_INTER_FREQ_VOLTE",
+    "EFICIENCIA_RRC_LTE",
+    "EFICIENCIA_SIG_S1_LTE",
+    "TAXA_COMP_VOZ_VOLTE_LTE",
+    "TAXA_QUEDA_SESSAO_LTE",
+    "TAXA_QUEDA_VOZ_LTE",
+    "TAXA_SUCES_EXEC_HO_VOLTE_LTE",
+]
+
+VOLUMETRIC_COLS_4G = [
+    "TAXA_DADOS_DIRETO_LTE",
+    "TAXA_DADOS_REVERSO_LTE",
+    "TRAFEGO_VOZ_LTE",
+    "UE_MED_TOTAL_LTE",
+    "UE_MEDIO_LTE",
+    "UE_MEDIO_VOLTE_LTE",
+    "VOLUME_DIRETO_LTE",
+    "VOLUME_DIRETO_VOLTE_LTE",
+    "VOLUME_REVERSO_LTE",
+    "VOLUME_REVERSO_VOLTE_LTE",
+]
+
+OTHERS_COLS_4G = [
+    "INTERFERENCIA_MED_PUSCH_LTE",
+    "LATENCIA_BUFFER_DL_TOTAL_LTE",
+    "LATENCIA_BUFFER_DL_VOLTE_LTE",
+]
+
+PERCENTAGE_COLS_5G = [
+    "TAXA_QUEDA_ENDC_SGNB_NSA_NR",
+    "EFICIENCIA_HANDOVER_INTER_SA_NR",
+    "EFICIENCIA_RRC_SA_NR",
+    "EFICIENCIA_QOSFLOW_SA_NR",
+    "EFICIENCIA_HANDOVER_INTRA_SA_NR",
+    "ACESSIBILIDADE_DADOS_SA_NR",
+    "DISPONIBILIDADE_NR",
+    "EFICIENCIA_SINALIZACAO_NG_NR",
+    "EFICIENCIA_HANDOVER_INTER_NSA_NR",
+    "EFICIENCIA_HANDOVER_INTRA_NSA_NR",
+    "TAXA_QUEDA_ENDC_NSA_NR",
+    "TAXA_QUEDA_SA_NR",
+    "ACESSIBILIDADE_DADOS_NSA_NR",
+    "TAXA_QUEDA_VONR",
+]
+
+VOLUMETRIC_COLS_5G = [
+    "UE_MEDIO_SA_NR",
+    "TAXA_DADOS_DIRETO_NR",
+    "UE_MEDIO_NR",
+    "TAXA_DADOS_REVERSO_NR",
+    "VOLUME_DIRETO_NR",
+    "VOLUME_REVERSO_NR",
+]
+
+OTHERS_COLS_5G = [
+    "LATENCIA_NR",
+    "INTERFERENCIA_UL_NR",
+]
+
+
+
+
 THRESHOLDS_4G = {
 
     "ACESSIBILIDADE_DADOS_LTE":
@@ -144,3 +254,50 @@ THRESHOLDS_5G = {
     "TAXA_DADOS_REVERSO_NR":
         {"op": "gt", "value": 50000, "min_pass_ratio": 0.70},
 }
+
+#Summarize
+
+.groupby(
+    ["SITE", "indicator"],
+    observed=True
+)
+
+
+#Classify
+
+.groupby(
+    "SITE",
+    observed=True
+)
+#Datetime
+df_4g = df_4g[
+    df_4g["DATA"].dt.hour.between(8, 20)
+]
+
+def date_time(df):
+    df["DATA"] = pd.to_datetime(
+        df["DATA"],
+        dayfirst=True,
+        errors="coerce"
+    )
+
+    return df
+#
+status_map_4g = (
+    site_summary_4g
+    .set_index("SITE")["site_classification"]
+)
+
+df_4g["site_classification"] = (
+    df_4g["SITE"].map(status_map_4g)
+)
+
+#
+status_map_5g = (
+    site_summary_5g
+    .set_index("SITE")["site_classification"]
+)
+
+df_5g["site_classification"] = (
+    df_5g["SITE"].map(status_map_5g)
+)
