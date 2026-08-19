@@ -1,0 +1,146 @@
+THRESHOLDS_4G = {
+
+    "ACESSIBILIDADE_DADOS_LTE":
+        {"op": "gt", "value": 99, "min_pass_ratio": 0.80},
+
+    "DISPONIBILIDADE_LTE":
+        {"op": "gt", "value": 99, "min_pass_ratio": 0.80},
+
+    "EFICIENCIA_CSFB_PREP_LTE":
+        {"op": "gt", "value": 99, "min_pass_ratio": 0.80},
+
+    "EFICIENCIA_ERAB_LTE":
+        {"op": "gt", "value": 99, "min_pass_ratio": 0.80},
+
+    "EFICIENCIA_HANDOVER_LTE":
+        {"op": "gt", "value": 97, "min_pass_ratio": 0.80},
+
+    "EFICIENCIA_HO_INTER_FREQ_VOLTE":
+        {"op": "gt", "value": 97, "min_pass_ratio": 0.80},
+
+    "EFICIENCIA_RRC_LTE":
+        {"op": "gt", "value": 99, "min_pass_ratio": 0.80},
+
+    "EFICIENCIA_SIG_S1_LTE":
+        {"op": "gt", "value": 99, "min_pass_ratio": 0.80},
+
+    "INTERFERENCIA_MED_PUSCH_LTE":
+        {"op": "lt", "value": -110, "min_pass_ratio": 0.80},
+
+    "LATENCIA_BUFFER_DL_TOTAL_LTE":
+        {"op": "lt", "value": 15, "min_pass_ratio": 0.80},
+
+    "LATENCIA_BUFFER_DL_VOLTE_LTE":
+        {"op": "lt", "value": 15, "min_pass_ratio": 0.80},
+
+    "TAXA_COMP_VOZ_VOLTE_LTE":
+        {"op": "gt", "value": 99, "min_pass_ratio": 0.80},
+
+    "TAXA_DADOS_DIRETO_LTE":
+        {"op": "gt", "value": 5000, "min_pass_ratio": 0.80},
+
+    "TAXA_QUEDA_SESSAO_LTE":
+        {"op": "lt", "value": 0.4, "min_pass_ratio": 0.80},
+
+    "TAXA_QUEDA_VOZ_LTE":
+        {"op": "lt", "value": 0.4, "min_pass_ratio": 0.80},
+
+    "TAXA_SUCES_EXEC_HO_VOLTE_LTE":
+        {"op": "gt", "value": 99, "min_pass_ratio": 0.80},
+
+    "TRAFEGO_VOZ_LTE":
+        {"op": "gt", "value": 0, "min_pass_ratio": 0.80},
+
+    "UE_MED_TOTAL_LTE":
+        {"op": "gt", "value": 0, "min_pass_ratio": 0.80},
+
+    "UE_MEDIO_LTE":
+        {"op": "gt", "value": 0, "min_pass_ratio": 0.80},
+
+    "UE_MEDIO_VOLTE_LTE":
+        {"op": "gt", "value": 0, "min_pass_ratio": 0.80},
+
+    "VOLUME_DIRETO_LTE":
+        {"op": "gt", "value": 0, "min_pass_ratio": 0.80},
+
+    "VOLUME_DIRETO_VOLTE_LTE":
+        {"op": "gt", "value": 0, "min_pass_ratio": 0.80},
+
+    "VOLUME_REVERSO_LTE":
+        {"op": "gt", "value": 0, "min_pass_ratio": 0.80},
+
+    "VOLUME_REVERSO_VOLTE_LTE":
+        {"op": "gt", "value": 0, "min_pass_ratio": 0.80},
+
+    "TAXA_DADOS_REVERSO_LTE":
+        {"op": "gt", "value": 1000, "min_pass_ratio": 0.70},
+}
+
+THRESHOLDS_5G = {
+
+    "TAXA_QUEDA_ENDC_SGNB_NSA_NR":
+        {"op": "lt", "value": 2, "min_pass_ratio": 0.80},
+
+    "EFICIENCIA_HANDOVER_INTER_SA_NR":
+        {"op": "gt", "value": 97, "min_pass_ratio": 0.80},
+
+    "EFICIENCIA_RRC_SA_NR":
+        {"op": "gt", "value": 99, "min_pass_ratio": 0.80},
+
+    "EFICIENCIA_QOSFLOW_SA_NR":
+        {"op": "gt", "value": 99, "min_pass_ratio": 0.80},
+
+    "EFICIENCIA_HANDOVER_INTRA_SA_NR":
+        {"op": "gt", "value": 97, "min_pass_ratio": 0.80},
+
+    "ACESSIBILIDADE_DADOS_SA_NR":
+        {"op": "gt", "value": 99, "min_pass_ratio": 0.80},
+
+    "DISPONIBILIDADE_NR":
+        {"op": "gt", "value": 99, "min_pass_ratio": 0.80},
+
+    "UE_MEDIO_SA_NR":
+        {"op": "gt", "value": 0, "min_pass_ratio": 0.80},
+
+    "EFICIENCIA_SINALIZACAO_NG_NR":
+        {"op": "gt", "value": 99, "min_pass_ratio": 0.80},
+
+    "EFICIENCIA_HANDOVER_INTER_NSA_NR":
+        {"op": "gt", "value": 97, "min_pass_ratio": 0.80},
+
+    "EFICIENCIA_HANDOVER_INTRA_NSA_NR":
+        {"op": "gt", "value": 97, "min_pass_ratio": 0.80},
+
+    "TAXA_DADOS_DIRETO_NR":
+        {"op": "gt", "value": 100000, "min_pass_ratio": 0.80},
+
+    "TAXA_QUEDA_ENDC_NSA_NR":
+        {"op": "lt", "value": 2, "min_pass_ratio": 0.80},
+
+    "UE_MEDIO_NR":
+        {"op": "gt", "value": 0, "min_pass_ratio": 0.80},
+
+    "LATENCIA_NR":
+        {"op": "lt", "value": 10, "min_pass_ratio": 0.80},
+
+    "TAXA_QUEDA_SA_NR":
+        {"op": "lt", "value": 2, "min_pass_ratio": 0.80},
+
+    "VOLUME_DIRETO_NR":
+        {"op": "gt", "value": 0, "min_pass_ratio": 0.80},
+
+    "ACESSIBILIDADE_DADOS_NSA_NR":
+        {"op": "gt", "value": 99, "min_pass_ratio": 0.80},
+
+    "VOLUME_REVERSO_NR":
+        {"op": "gt", "value": 0, "min_pass_ratio": 0.80},
+
+    "TAXA_QUEDA_VONR":
+        {"op": "lt", "value": 2, "min_pass_ratio": 0.80},
+
+    "INTERFERENCIA_UL_NR":
+        {"op": "lt", "value": -110, "min_pass_ratio": 0.80},
+
+    "TAXA_DADOS_REVERSO_NR":
+        {"op": "gt", "value": 50000, "min_pass_ratio": 0.70},
+}
