@@ -1,0 +1,210 @@
+def build_activation_scope(pmts_df):
+    """
+    Transforma as obras recentes da PMTS em um escopo único de:
+    SITE + TECNOLOGIA + FREQ.
+
+    Exemplo:
+        PMO_TECN_EQUIP = "4G|5G"
+        PMO_FREQ_EQUIP = "700/2100/2600 | 3500"
+
+    Resultado:
+        SITE | TECNOLOGIA | FREQ
+        X    | 4G         | 700
+        X    | 4G         | 2100
+        X    | 4G         | 2600
+        X    | 5G         | 3500
+
+    Frequências repetidas por MIMO são consideradas a mesma frequência.
+    """
+
+    required_cols = [
+        "UID_UFSIGLA",
+        "PMO_TECN_EQUIP",
+        "PMO_FREQ_EQUIP",
+    ]
+
+    missing_cols = [
+        col for col in required_cols
+        if col not in pmts_df.columns
+    ]
+
+    if missing_cols:
+        raise ValueError(
+            f"Colunas ausentes na PMTS: {missing_cols}"
+        )
+
+    records = []
+    issues = []
+
+    for idx, row in pmts_df.iterrows():
+
+        site = row["UID_UFSIGLA"]
+        tecn = row["PMO_TECN_EQUIP"]
+        freq = row["PMO_FREQ_EQUIP"]
+
+        if pd.isna(site) or pd.isna(tecn) or pd.isna(freq):
+            continue
+
+        site = str(site).strip().upper()
+
+        # Exemplo: "4G|5G" -> ["4G", "5G"]
+        technologies = [
+            item.strip().upper()
+            for item in str(tecn).split("|")
+            if item.strip()
+        ]
+
+        # Exemplo:
+        # "700/2100/2600 | 3500"
+        # -> ["700/2100/2600", "3500"]
+        freq_groups = [
+            item.strip()
+            for item in str(freq).split("|")
+            if item.strip()
+        ]
+
+        # A posição dos grupos precisa ser correspondente:
+        # 4G | 5G
+        # grupo_4G | grupo_5G
+        if len(technologies) != len(freq_groups):
+            issues.append({
+                "INDEX": idx,
+                "SITE": site,
+                "PMO_TECN_EQUIP": tecn,
+                "PMO_FREQ_EQUIP": freq,
+            })
+            continue
+
+        for technology, freq_group in zip(
+            technologies,
+            freq_groups
+        ):
+
+            # Extrai apenas as frequências.
+            # Ex:
+            # "700/1800/2100 + MIMO 1800/2100"
+            # -> [700, 1800, 2100]
+            frequencies = {
+                int(value)
+                for value in re.findall(r"\d{3,4}", freq_group)
+            }
+
+            for frequency in frequencies:
+                records.append({
+                    "SITE": site,
+                    "TECNOLOGIA": technology,
+                    "FREQ": frequency,
+                })
+
+    scope = pd.DataFrame(
+        records,
+        columns=["SITE", "TECNOLOGIA", "FREQ"]
+    )
+
+    # Um mesmo site pode ter várias obras.
+    # Impede que o merge multiplique as linhas de desempenho.
+    scope = (
+        scope
+        .drop_duplicates(
+            subset=["SITE", "TECNOLOGIA", "FREQ"]
+        )
+        .reset_index(drop=True)
+    )
+
+    issues = pd.DataFrame(issues)
+
+    return scope, issues
+
+
+def filter_by_activation_scope(
+    df,
+    activation_scope,
+    technology,
+):
+    """
+    Mantém somente SITE + FREQ que correspondem às ativações
+    recentes da tecnologia informada.
+    """
+
+    df = df.copy()
+
+    df["SITE"] = (
+        df["SITE"]
+        .astype("string")
+        .str.strip()
+        .str.upper()
+    )
+
+    df["FREQ"] = pd.to_numeric(
+        df["FREQ"],
+        errors="coerce"
+    ).astype("Int64")
+
+    allowed = (
+        activation_scope[
+            activation_scope["TECNOLOGIA"] == technology.upper()
+        ][["SITE", "FREQ"]]
+        .drop_duplicates()
+        .copy()
+    )
+
+    allowed["FREQ"] = allowed["FREQ"].astype("Int64")
+
+    filtered = df.merge(
+        allowed,
+        on=["SITE", "FREQ"],
+        how="inner",
+        validate="many_to_one",
+    )
+
+    return filtered
+
+
+
+
+
+
+------
+
+PMTS_ACTIVATIONS = c.read_sql(
+    "movel_rf",
+    "pmts_rf",
+    BANCO,
+    colunas="""
+        UID_UFSIGLA,
+        INTEGRADOR_ATIVACAO_R,
+        PMO_TECN_EQUIP,
+        PMO_FREQ_EQUIP
+    """,
+    where="""
+        INTEGRADOR_ATIVACAO_R >= NOW() - INTERVAL 60 DAY
+        AND UID_UFSIGLA IS NOT NULL
+        AND PMO_TECN_EQUIP IS NOT NULL
+        AND PMO_FREQ_EQUIP IS NOT NULL
+    """
+)
+-----
+activation_scope, activation_issues = (
+    prep.build_activation_scope(PMTS_ACTIVATIONS)
+)
+
+
+-----
+
+display(activation_scope.head(20))
+
+
+
+display(
+    df_4g[
+        df_4g["SITE"] == "SITE_PROBLEMA"
+    ][["SITE", "FREQ"]].drop_duplicates()
+)
+
+
+display(
+    df_5g[
+        df_5g["SITE"] == "SITE_PROBLEMA"
+    ][["SITE", "FREQ"]].drop_duplicates()
+)
+
