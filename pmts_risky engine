@@ -56,7 +56,9 @@ import pandas as pd
 @dataclass(frozen=True)
 class Config:
     pmts_table: str = "movel_rf.pmts_rf"
-    compare_table: str = "movel_rf.base_compare_pmts_rf"  # ajuste o schema se necessário
+    compare_table: str = "movel_rf.base_compare_pmts_rf"
+
+    # Tabelas padrão usadas com o conector Conntomysql (C.read_sql)
 
     # População alvo
     budget_value: str = "ORCAMENTO"
@@ -105,9 +107,11 @@ BASE_COLUMNS = [
     "PMO_REGIONAL",
     "PMO_TECN_EQUIP",
     "PMO_FREQ_EQUIP",
+    "REGIONAL_EAP_CRITICA",
 
     # Detentora / vendors
     "RSO_RSA_DETENTORA",
+    "RSO_RFI_R",
     "VENDOR_EQUIPAMENTO",
     "VENDOR_PROJETO",
     "VENDOR_INSTALADOR",
@@ -1146,3 +1150,178 @@ def run_pipeline(
 #         ]
 #     ].sort_values("PROB_CUMPRIR_CARIMBO_PCT")
 # )
+
+
+# Configuração final com os schemas solicitados
+CFG = Config(
+    pmts_table="movel_rf.pmts_rf",
+    compare_table="movel_rf.base_compare_pmts_rf",
+    output_dir="outputs/risk",
+)
+
+def save_outputs(
+    gold: pd.DataFrame,
+    intervals: pd.DataFrame,
+    cfg: Config = CFG,
+):
+    out = Path(cfg.output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+
+    stamp = pd.Timestamp.today().strftime("%Y%m%d")
+    excel_path = out / f"pmts_risk_{stamp}.xlsx"
+
+    with pd.ExcelWriter(excel_path) as writer:
+        gold.to_excel(writer, sheet_name="gold_pmts_risk", index=False)
+        intervals.to_excel(writer, sheet_name="eap_intervals", index=False)
+
+    logger.info("Arquivo Excel: %s", excel_path)
+    return excel_path
+
+def _split_schema_table(full_table: str) -> Tuple[str, str]:
+    parts = full_table.split(".", 1)
+    if len(parts) != 2:
+        raise ValueError(f"Tabela inválida: {full_table!r}. Use schema.tabela")
+    return parts[0], parts[1]
+
+def _normalize_valid_flag(series: pd.Series) -> pd.Series:
+    return (
+        series.astype("string")
+        .str.strip()
+        .str.upper()
+        .str.replace("[", "", regex=False)
+        .str.replace("]", "", regex=False)
+    )
+
+def load_data_with_c(
+    C,
+    cfg: Config = CFG,
+    banco: str = "prod",
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Leitura usando assinatura Conntomysql.read_sql(database, tabela, banco, colunas=...)."""
+    pmts_schema, pmts_table = _split_schema_table(cfg.pmts_table)
+    cmp_schema, cmp_table = _split_schema_table(cfg.compare_table)
+
+    pmts = C.read_sql(
+        pmts_schema,
+        pmts_table,
+        banco,
+        colunas=", ".join(BASE_COLUMNS),
+    )
+
+    if pmts.empty:
+        raise ValueError("PMTS retornou vazia.")
+
+    pmts["PMO_CARIMBO_CENTRALIZADO"] = pd.to_datetime(
+        pmts["PMO_CARIMBO_CENTRALIZADO"],
+        errors="coerce",
+    )
+
+    valid_target = _normalize_valid_flag(
+        pd.Series([cfg.valid_ativacao_open_value])
+    ).iloc[0]
+    pmts_valid = _normalize_valid_flag(pmts["VALID_ATIVACAO"])
+    scope = pmts[
+        pmts["PMO_ROLLOUT_OVBK"].astype("string").str.strip().eq(cfg.budget_value)
+        & pmts["MASTEROBRA_STATUS_ROLLOUT"].astype("string").str.strip().eq(cfg.rollout_status)
+        & pmts["PMO_CARIMBO_CENTRALIZADO"].dt.year.eq(cfg.target_carimbo_year)
+        & pmts_valid.eq(valid_target)
+    ].copy()
+
+    reference = pmts.copy()
+
+    compare = C.read_sql(
+        cmp_schema,
+        cmp_table,
+        banco,
+        colunas="UID_IDPMTS, COLUNA, DE, PARA, DATA_NEW",
+    )
+    compare = compare[compare["COLUNA"].eq("EAP_AUTOMATICA")].copy()
+    compare["DATA_NEW"] = pd.to_datetime(compare["DATA_NEW"], errors="coerce")
+    compare = compare[compare["DATA_NEW"].notna()].copy()
+
+    ids_validos = set(reference["UID_IDPMTS"].dropna().astype("string"))
+    compare = compare[compare["UID_IDPMTS"].astype("string").isin(ids_validos)].copy()
+
+    logger.info(
+        "Carregado via C | alvo=%s obras | referência=%s linhas | compare=%s mudanças",
+        scope["UID_IDPMTS"].nunique() if not scope.empty else 0,
+        len(reference),
+        len(compare),
+    )
+
+    if scope.empty:
+        anos_disp = sorted(
+            pmts["PMO_CARIMBO_CENTRALIZADO"].dt.year.dropna().unique().tolist()
+        )
+        raise ValueError(
+            "Filtro retornou 0 obras. Ajuste target_carimbo_year/valid_ativacao. "
+            f"Anos disponíveis: {anos_disp[:10]}"
+        )
+
+    return scope, reference, compare
+
+def run_pipeline_with_c(
+    C,
+    cfg: Config = CFG,
+    as_of: Optional[pd.Timestamp] = None,
+    banco: str = "prod",
+):
+    if not hasattr(C, "read_sql") or not callable(C.read_sql):
+        raise AttributeError(
+            "O objeto C precisa expor read_sql(database, tabela, banco, ...)."
+        )
+
+    scope, reference, compare = load_data_with_c(C=C, cfg=cfg, banco=banco)
+
+    gold, intervals = build_gold_risk_table(
+        scope=scope,
+        reference=reference,
+        compare=compare,
+        cfg=cfg,
+        as_of=as_of,
+    )
+
+    save_outputs(gold, intervals, cfg)
+    return gold, intervals
+
+from Conntomysql import Conntomysql
+
+# Execução operacional: reduz tempo para conseguir concluir e gerar Excel.
+CFG_EXEC = Config(
+    pmts_table=CFG.pmts_table,
+    compare_table=CFG.compare_table,
+    output_dir=CFG.output_dir,
+    budget_value=CFG.budget_value,
+    rollout_status=CFG.rollout_status,
+    target_carimbo_year=CFG.target_carimbo_year,
+    valid_ativacao_open_value=CFG.valid_ativacao_open_value,
+    min_transition_samples=CFG.min_transition_samples,
+    min_residual_samples=CFG.min_residual_samples,
+    final_eaps=CFG.final_eaps,
+    random_seed=CFG.random_seed,
+    max_steps=CFG.max_steps,
+    n_simulations=5_000,
+)
+
+C = Conntomysql()
+gold_risk, eap_intervals = run_pipeline_with_c(C, cfg=CFG_EXEC, banco="prod")
+
+display(
+    gold_risk[
+        [
+            "UID_IDPMTS",
+            "UID_UFSIGLA",
+            "PMO_PROJETO",
+            "EAP_AUTOMATICA",
+            "PMO_CARIMBO_CENTRALIZADO",
+            "PROB_CUMPRIR_CARIMBO_PCT",
+            "DATA_P70",
+            "DATA_P80",
+            "DATA_P90",
+            "RISCO",
+            "MODEL_CONFIDENCE",
+            "CONFIDENCE_CLASS",
+            "CRITERIO_EXECUTIVO",
+        ]
+    ].sort_values("PROB_CUMPRIR_CARIMBO_PCT")
+)
