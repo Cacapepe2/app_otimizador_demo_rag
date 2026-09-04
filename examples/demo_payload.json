@@ -1,0 +1,166 @@
+{
+  "cover_slide": {
+    "cover": {
+      "brand": "vivo",
+      "title": "Report Executivo",
+      "subtitle": "Rollout & Projetos | Junho 2026"
+    }
+  },
+  "global_rollout": {
+    "title": "Visão Global - Rollout",
+    "summary_cards": [
+      {
+        "label": "Sites Novos",
+        "escopo": 3010,
+        "ativos": 1214,
+        "pct": 0.4
+      },
+      {
+        "label": "Ampliações Lógicas",
+        "escopo": 1590,
+        "ativos": 1374,
+        "pct": 0.87
+      },
+      {
+        "label": "Ampliações Físicas",
+        "escopo": 5051,
+        "ativos": 3181,
+        "pct": 0.63
+      }
+    ],
+    "regional_status": [
+      {
+        "regional": "NE/BA/SE",
+        "total": 972,
+        "pct": 0.55,
+        "risk": "Risco Baixo",
+        "comment": "Meta SN Capital - Alto volume de SN ativos em implantação e no orçamento."
+      },
+      {
+        "regional": "ES/RJ",
+        "total": 1191,
+        "pct": 0.44,
+        "risk": "Risco Baixo",
+        "comment": "Meta SN Capital - Alto volume de SN ativos em centralização e licenciamento."
+      },
+      {
+        "regional": "SP",
+        "total": 2243,
+        "pct": 0.44,
+        "risk": "Risco Baixo",
+        "comment": "Perspectivas das datas de RF e do pipeline de licenciamento."
+      },
+      {
+        "regional": "CO/NO",
+        "total": 1884,
+        "pct": 0.46,
+        "risk": "Risco Baixo",
+        "comment": "Planejamento de RFs e chegada de equipamentos para expansão."
+      },
+      {
+        "regional": "MG",
+        "total": 1117,
+        "pct": 0.43,
+        "risk": "Risco Baixo",
+        "comment": "Acompanhar lead time de sites novos e datas de RF."
+      }
+    ],
+    "main_risks": [
+      "Destravar contratos dos sites novos e regularização documental.",
+      "Replanejar RFIs pelos sharings associados a licenciamento e energia.",
+      "Acompanhar faturamento de equipamentos e datas críticas."
+    ]
+  },
+  "project_status": {
+    "title": "Status Report por Projeto",
+    "sections": [
+      {
+        "section": "5G GERAL",
+        "scope_total": "2.184 de 4.098",
+        "pct": 0.53,
+        "items": [
+          {
+            "name": "Lançamento novos Municípios",
+            "scope": "21 de 207",
+            "pct": 0.71,
+            "risk": "baixo"
+          },
+          {
+            "name": "Municípios 200k",
+            "scope": "102 de 107",
+            "pct": 1.0,
+            "risk": "baixo"
+          }
+        ]
+      },
+      {
+        "section": "TAV GERAL",
+        "scope_total": "354 de 914",
+        "pct": 0.39,
+        "items": [
+          {
+            "name": "TAV",
+            "scope": "175 de 499",
+            "pct": 0.35,
+            "risk": "medio"
+          },
+          {
+            "name": "Condomínios",
+            "scope": "63 de 142",
+            "pct": 0.44,
+            "risk": "medio"
+          },
+          {
+            "name": "Mobilidade/Rodovias",
+            "scope": "20 de 101",
+            "pct": 0.2,
+            "risk": "alto"
+          },
+          {
+            "name": "Eventos",
+            "scope": "116 de 223",
+            "pct": 0.52,
+            "risk": "baixo"
+          }
+        ]
+      },
+      {
+        "section": "B2B GERAL",
+        "scope_total": "74 de 637",
+        "pct": 0.12,
+        "items": [
+          {
+            "name": "Rodovias",
+            "scope": "40 de 244",
+            "pct": 0.16,
+            "risk": "medio"
+          },
+          {
+            "name": "Agro",
+            "scope": "19 de 212",
+            "pct": 0.09,
+            "risk": "medio"
+          },
+          {
+            "name": "Dedicado",
+            "scope": "11 de 51",
+            "pct": 0.21,
+            "risk": "medio"
+          },
+          {
+            "name": "Vale",
+            "scope": "3 de 119",
+            "pct": 0.04,
+            "risk": "medio"
+          },
+          {
+            "name": "Petrobras",
+            "scope": "0 de 54",
+            "pct": 0.0,
+            "risk": "alto"
+          }
+        ]
+      }
+    ]
+  }
+}
