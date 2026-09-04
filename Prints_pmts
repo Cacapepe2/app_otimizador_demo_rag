@@ -1,0 +1,13 @@
+print(history_time_col)
+
+print(
+    history[history_time_col]
+    .agg(["min", "max"])
+)
+
+print(
+    history[history_time_col]
+    .dt.year
+    .value_counts()
+    .sort_index()
+)
