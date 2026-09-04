@@ -1,0 +1,1148 @@
+"""
+PMTS Risk Engine — MVP Monte Carlo
+==================================
+
+Objetivo
+--------
+Avaliar obras:
+- PMO_ROLLOUT_OVBK = 'ORCAMENTO'
+- MASTEROBRA_STATUS_ROLLOUT = 'Disparado Implantação'
+- YEAR(PMO_CARIMBO_CENTRALIZADO) = 2027
+- VALID_ATIVACAO = 'N'
+
+e estimar:
+- probabilidade de cumprir o PMO_CARIMBO_CENTRALIZADO;
+- P50/P70/P80/P90 de conclusão;
+- risco;
+- confiabilidade da estimativa.
+
+Modelo
+------
+Semi-Markov empírico:
+1. lê transições de EAP_AUTOMATICA em base_compare_pmts_rf;
+2. DATA_NEW = instante real da mudança;
+3. reconstrói permanências e reentradas;
+4. aprende empiricamente pares (próxima EAP, duração);
+5. simula trajetórias até uma EAP final.
+
+IMPORTANTE
+----------
+- Confiabilidade != acurácia.
+- O score de confiabilidade deste MVP mede suporte de dados + estabilidade da
+  simulação. A acurácia/calibração real só pode ser afirmada após backtest.
+- Datas *_P são planejadas e *_R são realizadas. Elas são trazidas para a
+  camada de dados, mas NÃO entram automaticamente no Monte Carlo deste MVP
+  para evitar data leakage.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import date
+from pathlib import Path
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+import logging
+import math
+import warnings
+
+import numpy as np
+import pandas as pd
+
+
+# =============================================================================
+# CONFIGURAÇÃO
+# =============================================================================
+
+@dataclass(frozen=True)
+class Config:
+    pmts_table: str = "movel_rf.pmts_rf"
+    compare_table: str = "movel_rf.base_compare_pmts_rf"  # ajuste o schema se necessário
+
+    # População alvo
+    budget_value: str = "ORCAMENTO"
+    rollout_status: str = "Disparado Implantação"
+    target_carimbo_year: int = 2027
+    valid_ativacao_open_value: str = "N"
+
+    # Simulação
+    n_simulations: int = 10_000
+    max_steps: int = 60
+    random_seed: int = 42
+
+    # Suporte mínimo
+    min_transition_samples: int = 25
+    min_residual_samples: int = 15
+
+    # EAPs confirmadas como "ativas/finalizadas"
+    final_eaps: Tuple[str, ...] = (
+        "29.ATIVO EM PRE ACEITE",
+        "30.ATIVO EM CADASTRO",
+        "31.ATIVO EM ACEITE (O&M)",
+        "32.ATIVO EM ACEITE (IMPLT)",
+        "33.ATIVO E ACEITO",
+    )
+
+    # Saída
+    output_dir: str = "outputs/risk"
+
+
+CFG = Config()
+
+
+BASE_COLUMNS = [
+    # Chaves
+    "UID_IDPMTS",
+    "UID_IDENG",
+    "UID_UFSIGLA",
+
+    # Projeto / pilar
+    "ENG_OBJ_MACRO",
+    "MASTEROBRA_OBJ_ENG",
+    "PMO_PROJETO",
+    "PMO_REFERENCIA_REPORT",
+
+    # Segmentação
+    "PMO_REGIONAL",
+    "PMO_TECN_EQUIP",
+    "PMO_FREQ_EQUIP",
+
+    # Detentora / vendors
+    "RSO_RSA_DETENTORA",
+    "VENDOR_EQUIPAMENTO",
+    "VENDOR_PROJETO",
+    "VENDOR_INSTALADOR",
+
+    # Escopo / alvo / estado atual
+    "PMO_ROLLOUT_OVBK",
+    "MASTEROBRA_STATUS_ROLLOUT",
+    "PMO_CARIMBO_CENTRALIZADO",
+    "VALID_ATIVACAO",
+    "EAP_AUTOMATICA",
+
+    # Mantido para diagnóstico; não filtrado neste MVP
+    "PMO_DATA_EXCLUSAO",
+]
+
+
+# =============================================================================
+# LOG
+# =============================================================================
+
+logger = logging.getLogger("pmts_risk_engine")
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+    )
+    logger.addHandler(handler)
+logger.setLevel(logging.INFO)
+
+
+# =============================================================================
+# ACESSO A DADOS
+# =============================================================================
+
+ReadSQL = Callable[[str], pd.DataFrame]
+
+
+def _split_table_name(full_name: str) -> Tuple[str, str]:
+    parts = full_name.split(".", 1)
+    if len(parts) != 2:
+        raise ValueError(
+            f"Use tabela no formato schema.tabela. Recebido: {full_name!r}"
+        )
+    return parts[0], parts[1]
+
+
+def discover_columns(read_sql: ReadSQL, full_table: str) -> List[str]:
+    """
+    Descobre colunas físicas via INFORMATION_SCHEMA.
+    """
+    schema, table = _split_table_name(full_table)
+    sql = f"""
+        SELECT COLUMN_NAME
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = '{schema}'
+          AND TABLE_NAME = '{table}'
+        ORDER BY ORDINAL_POSITION
+    """
+    df = read_sql(sql)
+    if df.empty:
+        raise RuntimeError(
+            f"Não foi possível descobrir colunas de {full_table}. "
+            "Confirme schema/tabela e acesso ao INFORMATION_SCHEMA."
+        )
+
+    col = next(
+        (c for c in df.columns if c.upper() == "COLUMN_NAME"),
+        df.columns[0]
+    )
+    return df[col].astype(str).tolist()
+
+
+def choose_pmts_columns(
+    available_columns: Sequence[str],
+    include_plan_real_dates: bool = True,
+) -> List[str]:
+    """
+    Seleciona colunas conhecidas + todas as datas *_P e *_R disponíveis.
+
+    Campos opcionais ausentes são avisados, não derrubam o pipeline.
+    Campos obrigatórios para escopo/modelo são validados separadamente.
+    """
+    available = set(available_columns)
+
+    selected = [c for c in BASE_COLUMNS if c in available]
+
+    missing_optional = [c for c in BASE_COLUMNS if c not in available]
+    if missing_optional:
+        warnings.warn(
+            "Colunas opcionais não encontradas e serão ignoradas: "
+            + ", ".join(missing_optional)
+        )
+
+    if include_plan_real_dates:
+        suffix_cols = [
+            c for c in available_columns
+            if c.endswith("_P") or c.endswith("_R")
+        ]
+        selected.extend(suffix_cols)
+
+    # Preserva ordem sem duplicar
+    return list(dict.fromkeys(selected))
+
+
+def validate_required_pmts_columns(columns: Sequence[str]) -> None:
+    required = {
+        "UID_IDPMTS",
+        "UID_UFSIGLA",
+        "PMO_ROLLOUT_OVBK",
+        "MASTEROBRA_STATUS_ROLLOUT",
+        "PMO_CARIMBO_CENTRALIZADO",
+        "VALID_ATIVACAO",
+        "EAP_AUTOMATICA",
+    }
+    missing = sorted(required - set(columns))
+    if missing:
+        raise ValueError(
+            "Colunas obrigatórias não encontradas na PMTS: "
+            + ", ".join(missing)
+        )
+
+
+def build_scope_sql(columns: Sequence[str], cfg: Config = CFG) -> str:
+    selected = ",\n        ".join(f"`{c}`" for c in columns)
+    return f"""
+    SELECT
+        {selected}
+    FROM {cfg.pmts_table}
+    WHERE PMO_ROLLOUT_OVBK = '{cfg.budget_value}'
+      AND MASTEROBRA_STATUS_ROLLOUT = '{cfg.rollout_status}'
+      AND YEAR(PMO_CARIMBO_CENTRALIZADO) = {cfg.target_carimbo_year}
+      AND VALID_ATIVACAO = '{cfg.valid_ativacao_open_value}'
+    """
+
+
+def build_reference_sql(columns: Sequence[str], cfg: Config = CFG) -> str:
+    """
+    Base atual completa apenas com campos de identificação/segmentação.
+
+    É usada para anexar atributos às transições históricas.
+    Não aplica o filtro alvo de 2027.
+    """
+    keep = [
+        c for c in columns
+        if c in {
+            "UID_IDPMTS",
+            "UID_UFSIGLA",
+            "ENG_OBJ_MACRO",
+            "MASTEROBRA_OBJ_ENG",
+            "PMO_PROJETO",
+            "PMO_REFERENCIA_REPORT",
+            "PMO_REGIONAL",
+            "PMO_TECN_EQUIP",
+            "PMO_FREQ_EQUIP",
+            "RSO_RSA_DETENTORA",
+            "VENDOR_EQUIPAMENTO",
+            "VENDOR_PROJETO",
+            "VENDOR_INSTALADOR",
+            "EAP_AUTOMATICA",
+            "VALID_ATIVACAO",
+        }
+    ]
+    selected = ",\n        ".join(f"`{c}`" for c in keep)
+
+    return f"""
+    SELECT
+        {selected}
+    FROM {cfg.pmts_table}
+    """
+
+
+def build_compare_sql(cfg: Config = CFG) -> str:
+    """
+    Traz apenas mudanças de EAP e somente IDs que ainda existem na PMTS atual,
+    conforme regra de negócio confirmada.
+
+    DATA_NEW é usada como timestamp real da transição.
+    """
+    return f"""
+    SELECT
+        c.UID_IDPMTS,
+        c.COLUNA,
+        c.DE,
+        c.PARA,
+        c.DATA_NEW
+    FROM {cfg.compare_table} c
+    INNER JOIN {cfg.pmts_table} p
+        ON p.UID_IDPMTS = c.UID_IDPMTS
+    WHERE c.COLUNA = 'EAP_AUTOMATICA'
+      AND c.DATA_NEW IS NOT NULL
+    """
+
+
+def load_data(read_sql: ReadSQL, cfg: Config = CFG):
+    logger.info("Descobrindo colunas da PMTS...")
+    available = discover_columns(read_sql, cfg.pmts_table)
+    validate_required_pmts_columns(available)
+
+    selected = choose_pmts_columns(available, include_plan_real_dates=True)
+
+    logger.info("Lendo população alvo...")
+    scope = read_sql(build_scope_sql(selected, cfg))
+
+    logger.info("Lendo referência atual de obras...")
+    reference = read_sql(build_reference_sql(selected, cfg))
+
+    logger.info("Lendo histórico de mudanças de EAP...")
+    compare = read_sql(build_compare_sql(cfg))
+
+    logger.info(
+        "Carregado | alvo=%s obras | referência=%s linhas | compare=%s mudanças",
+        scope["UID_IDPMTS"].nunique() if not scope.empty else 0,
+        len(reference),
+        len(compare),
+    )
+
+    return scope, reference, compare
+
+
+# =============================================================================
+# PREPARAÇÃO DO HISTÓRICO
+# =============================================================================
+
+def normalize_eap(value):
+    if pd.isna(value):
+        return np.nan
+    return str(value).strip()
+
+
+def prepare_compare(compare: pd.DataFrame) -> pd.DataFrame:
+    required = {"UID_IDPMTS", "COLUNA", "DE", "PARA", "DATA_NEW"}
+    missing = required - set(compare.columns)
+    if missing:
+        raise ValueError(
+            "base_compare_pmts_rf sem colunas obrigatórias: "
+            + ", ".join(sorted(missing))
+        )
+
+    df = compare.copy()
+
+    df["DATA_NEW"] = pd.to_datetime(df["DATA_NEW"], errors="coerce")
+    df["DE"] = df["DE"].map(normalize_eap)
+    df["PARA"] = df["PARA"].map(normalize_eap)
+
+    df = df[
+        df["DATA_NEW"].notna()
+        & df["UID_IDPMTS"].notna()
+        & df["PARA"].notna()
+    ].copy()
+
+    # Duplicatas exatas de auditoria não devem criar permanências artificiais
+    df = df.drop_duplicates(
+        subset=["UID_IDPMTS", "COLUNA", "DE", "PARA", "DATA_NEW"]
+    )
+
+    return df.sort_values(["UID_IDPMTS", "DATA_NEW"]).reset_index(drop=True)
+
+
+def reconstruct_eap_intervals(compare: pd.DataFrame) -> pd.DataFrame:
+    """
+    Cada mudança DE -> PARA em DATA_NEW significa entrada em PARA.
+
+    A permanência em PARA termina na DATA_NEW da próxima mudança da mesma obra.
+    A última permanência fica censurada e não entra na distribuição de duração.
+    """
+    df = prepare_compare(compare)
+
+    df["NEXT_DATA_NEW"] = df.groupby("UID_IDPMTS")["DATA_NEW"].shift(-1)
+    df["NEXT_EAP"] = df.groupby("UID_IDPMTS")["PARA"].shift(-1)
+
+    intervals = df.rename(
+        columns={
+            "PARA": "EAP",
+            "DATA_NEW": "ENTRADA_EM",
+        }
+    ).copy()
+
+    intervals["SAIDA_EM"] = intervals["NEXT_DATA_NEW"]
+    intervals["DURACAO_DIAS"] = (
+        intervals["SAIDA_EM"] - intervals["ENTRADA_EM"]
+    ).dt.total_seconds() / 86400.0
+
+    intervals["IS_CENSORED"] = intervals["SAIDA_EM"].isna()
+
+    # Só permanências completas e temporalmente válidas entram no treinamento
+    intervals["VALID_FOR_TRAINING"] = (
+        ~intervals["IS_CENSORED"]
+        & intervals["DURACAO_DIAS"].notna()
+        & (intervals["DURACAO_DIAS"] >= 0)
+        & intervals["NEXT_EAP"].notna()
+    )
+
+    intervals["ORDEM_VISITA"] = (
+        intervals.groupby(["UID_IDPMTS", "EAP"]).cumcount() + 1
+    )
+
+    return intervals[
+        [
+            "UID_IDPMTS",
+            "DE",
+            "EAP",
+            "NEXT_EAP",
+            "ENTRADA_EM",
+            "SAIDA_EM",
+            "DURACAO_DIAS",
+            "ORDEM_VISITA",
+            "IS_CENSORED",
+            "VALID_FOR_TRAINING",
+        ]
+    ].copy()
+
+
+def attach_current_attributes(
+    intervals: pd.DataFrame,
+    reference: pd.DataFrame,
+) -> pd.DataFrame:
+    attrs = [
+        c for c in [
+            "UID_IDPMTS",
+            "UID_UFSIGLA",
+            "PMO_PROJETO",
+            "PMO_REGIONAL",
+            "MASTEROBRA_OBJ_ENG",
+            "VENDOR_INSTALADOR",
+            "VENDOR_PROJETO",
+            "VENDOR_EQUIPAMENTO",
+            "RSO_RSA_DETENTORA",
+            "PMO_TECN_EQUIP",
+            "PMO_FREQ_EQUIP",
+        ]
+        if c in reference.columns
+    ]
+
+    ref = reference[attrs].drop_duplicates("UID_IDPMTS")
+
+    return intervals.merge(
+        ref,
+        on="UID_IDPMTS",
+        how="left",
+        validate="many_to_one",
+    )
+
+
+# =============================================================================
+# POOLS EMPÍRICOS DE TRANSIÇÃO
+# =============================================================================
+
+@dataclass
+class TransitionPool:
+    durations: np.ndarray
+    next_eaps: np.ndarray
+    work_ids: np.ndarray
+    level: str
+
+    @property
+    def n(self) -> int:
+        return len(self.durations)
+
+    @property
+    def n_works(self) -> int:
+        return pd.Series(self.work_ids).nunique()
+
+
+def _clean_key(value) -> str:
+    if pd.isna(value):
+        return "__NA__"
+    return str(value).strip()
+
+
+def build_transition_pools(intervals: pd.DataFrame):
+    """
+    Fallback hierárquico:
+
+    1. EAP + projeto + regional
+    2. EAP + projeto
+    3. EAP global
+
+    Vendors são mantidos na tabela ouro e podem entrar como nível adicional
+    depois que houver diagnóstico de amostra suficiente.
+    """
+    train = intervals[intervals["VALID_FOR_TRAINING"]].copy()
+
+    for c in ["PMO_PROJETO", "PMO_REGIONAL"]:
+        if c not in train.columns:
+            train[c] = "__NA__"
+        train[c] = train[c].map(_clean_key)
+
+    train["EAP"] = train["EAP"].map(normalize_eap)
+    train["NEXT_EAP"] = train["NEXT_EAP"].map(normalize_eap)
+
+    pools: Dict[Tuple, TransitionPool] = {}
+
+    levels = [
+        ("project_regional", ["EAP", "PMO_PROJETO", "PMO_REGIONAL"]),
+        ("project", ["EAP", "PMO_PROJETO"]),
+        ("global_eap", ["EAP"]),
+    ]
+
+    for level_name, group_cols in levels:
+        grouper = group_cols[0] if len(group_cols) == 1 else group_cols
+        for key, g in train.groupby(grouper, dropna=False):
+            if not isinstance(key, tuple):
+                key = (key,)
+
+            full_key = (level_name,) + tuple(_clean_key(x) for x in key)
+
+            pools[full_key] = TransitionPool(
+                durations=g["DURACAO_DIAS"].to_numpy(dtype=float),
+                next_eaps=g["NEXT_EAP"].astype(str).to_numpy(),
+                work_ids=g["UID_IDPMTS"].to_numpy(),
+                level=level_name,
+            )
+
+    return pools
+
+
+def select_transition_pool(
+    pools: Dict[Tuple, TransitionPool],
+    eap: str,
+    project,
+    regional,
+    cfg: Config = CFG,
+) -> Optional[TransitionPool]:
+    eap = _clean_key(eap)
+    project = _clean_key(project)
+    regional = _clean_key(regional)
+
+    candidate_keys = [
+        ("project_regional", eap, project, regional),
+        ("project", eap, project),
+        ("global_eap", eap),
+    ]
+
+    # Primeiro tenta respeitar amostra mínima
+    for key in candidate_keys:
+        pool = pools.get(key)
+        if pool is not None and pool.n >= cfg.min_transition_samples:
+            return pool
+
+    # Se não houver amostra mínima, aceita o pool global da EAP se existir
+    return pools.get(("global_eap", eap))
+
+
+# =============================================================================
+# ESTADO ATUAL / AGING DA EAP
+# =============================================================================
+
+def current_eap_entry_info(
+    scope: pd.DataFrame,
+    compare: pd.DataFrame,
+    as_of: pd.Timestamp,
+) -> pd.DataFrame:
+    """
+    Procura a última transição registrada de cada obra.
+
+    Se a última PARA da compare coincide com a EAP atual da PMTS, usa DATA_NEW
+    como última entrada na EAP.
+    """
+    comp = prepare_compare(compare)
+
+    last = (
+        comp.sort_values(["UID_IDPMTS", "DATA_NEW"])
+        .groupby("UID_IDPMTS", as_index=False)
+        .tail(1)
+        [["UID_IDPMTS", "PARA", "DATA_NEW"]]
+        .rename(
+            columns={
+                "PARA": "COMPARE_LAST_EAP",
+                "DATA_NEW": "EAP_ATUAL_ENTRADA_EM",
+            }
+        )
+    )
+
+    out = scope.merge(last, on="UID_IDPMTS", how="left")
+
+    out["EAP_AUTOMATICA"] = out["EAP_AUTOMATICA"].map(normalize_eap)
+    out["COMPARE_LAST_EAP"] = out["COMPARE_LAST_EAP"].map(normalize_eap)
+
+    out["EAP_COMPARE_CONSISTENTE"] = (
+        out["EAP_AUTOMATICA"] == out["COMPARE_LAST_EAP"]
+    )
+
+    out["DIAS_STREAK_EAP_ATUAL"] = np.where(
+        out["EAP_COMPARE_CONSISTENTE"]
+        & out["EAP_ATUAL_ENTRADA_EM"].notna(),
+        (
+            as_of.normalize() - out["EAP_ATUAL_ENTRADA_EM"].dt.normalize()
+        ).dt.days,
+        np.nan,
+    )
+
+    return out
+
+
+# =============================================================================
+# MONTE CARLO
+# =============================================================================
+
+def percentile_date(
+    as_of: pd.Timestamp,
+    completion_days: np.ndarray,
+    q: float,
+):
+    if completion_days.size == 0:
+        return pd.NaT
+
+    days = float(np.quantile(completion_days, q))
+    return as_of.normalize() + pd.to_timedelta(days, unit="D")
+
+
+def risk_class(prob_on_time: float) -> str:
+    if pd.isna(prob_on_time):
+        return "SEM_MODELO"
+    if prob_on_time >= 0.90:
+        return "BAIXO"
+    if prob_on_time >= 0.70:
+        return "ATENCAO"
+    if prob_on_time >= 0.40:
+        return "ALTO"
+    return "CRITICO"
+
+
+def confidence_class(score: float) -> str:
+    if score >= 80:
+        return "ALTA"
+    if score >= 60:
+        return "MEDIA"
+    return "BAIXA"
+
+
+def model_confidence_score(
+    support_n_works: int,
+    resolution_rate: float,
+    mc_margin_95_pp: float,
+    eap_consistent: bool,
+) -> float:
+    """
+    Score heurístico de qualidade da evidência.
+
+    NÃO é acurácia.
+    A acurácia/calibração real deve vir de backtest temporal.
+    """
+    # ~150 obras comparáveis ou mais ~= suporte máximo
+    support = min(
+        1.0,
+        math.log1p(max(0, support_n_works)) / math.log1p(150)
+    )
+
+    resolution = float(np.clip(resolution_rate, 0, 1))
+
+    # Margem MC <= 1pp = excelente; >= 5pp = muito fraca
+    precision = float(np.clip(1.0 - (mc_margin_95_pp - 1.0) / 4.0, 0, 1))
+
+    consistency = 1.0 if eap_consistent else 0.35
+
+    score = 100 * (
+        0.40 * support
+        + 0.35 * resolution
+        + 0.15 * precision
+        + 0.10 * consistency
+    )
+    return round(float(np.clip(score, 0, 100)), 1)
+
+
+def explain_risk(
+    prob_on_time: float,
+    confidence: float,
+    elapsed_current_eap,
+    start_pool: Optional[TransitionPool],
+) -> Tuple[str, str]:
+    reasons = []
+
+    if pd.notna(prob_on_time):
+        if prob_on_time < 0.40:
+            reasons.append("prazo historico simulado insuficiente para o carimbo")
+        elif prob_on_time < 0.70:
+            reasons.append("historico indica risco relevante de ultrapassar o carimbo")
+        elif prob_on_time < 0.90:
+            reasons.append("margem para o carimbo ainda nao e confortavel")
+        else:
+            reasons.append("historico indica boa margem para cumprir o carimbo")
+
+    if (
+        start_pool is not None
+        and pd.notna(elapsed_current_eap)
+        and start_pool.n > 0
+    ):
+        p80_state = float(np.quantile(start_pool.durations, 0.80))
+        if float(elapsed_current_eap) > p80_state:
+            reasons.append("aging atual acima do P80 historico da EAP")
+
+    if confidence < 60:
+        reasons.append("baixa confiabilidade estatistica da estimativa")
+
+    while len(reasons) < 2:
+        reasons.append("sem segundo fator dominante identificado no MVP")
+
+    return reasons[0], reasons[1]
+
+
+def simulate_one_work(
+    row: pd.Series,
+    pools: Dict[Tuple, TransitionPool],
+    as_of: pd.Timestamp,
+    cfg: Config,
+    rng: np.random.Generator,
+) -> dict:
+    start_eap = normalize_eap(row.get("EAP_AUTOMATICA"))
+    deadline = pd.to_datetime(
+        row.get("PMO_CARIMBO_CENTRALIZADO"),
+        errors="coerce",
+    )
+
+    result = {
+        "PROB_CUMPRIR_CARIMBO": np.nan,
+        "PROB_ATRASAR": np.nan,
+        "DATA_P50": pd.NaT,
+        "DATA_P70": pd.NaT,
+        "DATA_P80": pd.NaT,
+        "DATA_P90": pd.NaT,
+        "RISCO": "SEM_MODELO",
+        "MODEL_CONFIDENCE": 0.0,
+        "CONFIDENCE_CLASS": "BAIXA",
+        "MC_MARGIN_95_PP": np.nan,
+        "N_HISTORICO_COMPARAVEL": 0,
+        "POOL_NIVEL": None,
+        "RESOLUTION_RATE": 0.0,
+        "PRINCIPAL_MOTIVO_RISCO": None,
+        "SEGUNDO_MOTIVO_RISCO": None,
+        "MODEL_STATUS": "OK",
+    }
+
+    if pd.isna(deadline):
+        result["MODEL_STATUS"] = "CARIMBO_INVALIDO"
+        return result
+
+    if not start_eap or pd.isna(start_eap):
+        result["MODEL_STATUS"] = "EAP_ATUAL_INVALIDA"
+        return result
+
+    if start_eap in cfg.final_eaps:
+        # Pela regra atual, target está VALID_ATIVACAO='N'.
+        # EAP final + N é uma divergência operacional e não deve ser "prevista".
+        result["MODEL_STATUS"] = "REVISAR_EAP_FINAL_COM_VALID_N"
+        return result
+
+    if deadline.normalize() < as_of.normalize():
+        result.update(
+            {
+                "PROB_CUMPRIR_CARIMBO": 0.0,
+                "PROB_ATRASAR": 1.0,
+                "RISCO": "CRITICO",
+                "MODEL_STATUS": "CARIMBO_JA_VENCIDO",
+                "PRINCIPAL_MOTIVO_RISCO": "carimbo centralizado ja vencido",
+                "SEGUNDO_MOTIVO_RISCO": "obra ainda nao esta ativada",
+            }
+        )
+        return result
+
+    project = row.get("PMO_PROJETO")
+    regional = row.get("PMO_REGIONAL")
+    elapsed = row.get("DIAS_STREAK_EAP_ATUAL")
+    elapsed = float(elapsed) if pd.notna(elapsed) else 0.0
+
+    start_pool = select_transition_pool(
+        pools, start_eap, project, regional, cfg
+    )
+
+    if start_pool is None or start_pool.n == 0:
+        result["MODEL_STATUS"] = "SEM_HISTORICO_PARA_EAP_ATUAL"
+        return result
+
+    completion_days = []
+    unresolved = 0
+
+    for _ in range(cfg.n_simulations):
+        current = start_eap
+        total_days = 0.0
+        finished = False
+
+        for step in range(cfg.max_steps):
+            if current in cfg.final_eaps:
+                finished = True
+                break
+
+            pool = select_transition_pool(
+                pools, current, project, regional, cfg
+            )
+            if pool is None or pool.n == 0:
+                break
+
+            durations = pool.durations
+            next_eaps = pool.next_eaps
+
+            # Na EAP atual, respeita o tempo já transcorrido.
+            if step == 0 and elapsed > 0:
+                eligible = np.flatnonzero(durations > elapsed)
+
+                if len(eligible) >= cfg.min_residual_samples:
+                    idx = int(rng.choice(eligible))
+                    duration = max(0.0, durations[idx] - elapsed)
+                else:
+                    # Fallback: amostra total e desconta aging já observado.
+                    idx = int(rng.integers(0, len(durations)))
+                    duration = max(0.0, durations[idx] - elapsed)
+            else:
+                idx = int(rng.integers(0, len(durations)))
+                duration = max(0.0, durations[idx])
+
+            total_days += duration
+            current = normalize_eap(next_eaps[idx])
+
+        if current in cfg.final_eaps:
+            finished = True
+
+        if finished:
+            completion_days.append(total_days)
+        else:
+            unresolved += 1
+
+    completion_days = np.asarray(completion_days, dtype=float)
+    resolved = len(completion_days)
+    resolution_rate = resolved / cfg.n_simulations
+
+    deadline_days = max(
+        0.0,
+        (deadline.normalize() - as_of.normalize()).days
+    )
+
+    # Conservador: simulações não resolvidas contam como "não cumpriu".
+    on_time_count = int(np.sum(completion_days <= deadline_days))
+    prob_on_time = on_time_count / cfg.n_simulations
+    prob_late = 1.0 - prob_on_time
+
+    # Erro de Monte Carlo (não é erro do modelo)
+    mc_se = math.sqrt(
+        max(prob_on_time * (1 - prob_on_time), 0.0)
+        / cfg.n_simulations
+    )
+    mc_margin_95_pp = 1.96 * mc_se * 100
+
+    evidence_conf = model_confidence_score(
+        support_n_works=start_pool.n_works,
+        resolution_rate=resolution_rate,
+        mc_margin_95_pp=mc_margin_95_pp,
+        eap_consistent=bool(row.get("EAP_COMPARE_CONSISTENTE", False)),
+    )
+
+    reason1, reason2 = explain_risk(
+        prob_on_time,
+        evidence_conf,
+        row.get("DIAS_STREAK_EAP_ATUAL"),
+        start_pool,
+    )
+
+    result.update(
+        {
+            "PROB_CUMPRIR_CARIMBO": round(prob_on_time, 4),
+            "PROB_ATRASAR": round(prob_late, 4),
+            "DATA_P50": percentile_date(as_of, completion_days, 0.50),
+            "DATA_P70": percentile_date(as_of, completion_days, 0.70),
+            "DATA_P80": percentile_date(as_of, completion_days, 0.80),
+            "DATA_P90": percentile_date(as_of, completion_days, 0.90),
+            "RISCO": risk_class(prob_on_time),
+            "MODEL_CONFIDENCE": evidence_conf,
+            "CONFIDENCE_CLASS": confidence_class(evidence_conf),
+            "MC_MARGIN_95_PP": round(mc_margin_95_pp, 2),
+            "N_HISTORICO_COMPARAVEL": int(start_pool.n_works),
+            "POOL_NIVEL": start_pool.level,
+            "RESOLUTION_RATE": round(resolution_rate, 4),
+            "PRINCIPAL_MOTIVO_RISCO": reason1,
+            "SEGUNDO_MOTIVO_RISCO": reason2,
+        }
+    )
+
+    return result
+
+
+# =============================================================================
+# CRITÉRIO EXECUTIVO
+# =============================================================================
+
+def executive_status(row: pd.Series) -> str:
+    p = row.get("PROB_CUMPRIR_CARIMBO")
+    conf = row.get("MODEL_CONFIDENCE", 0)
+
+    if pd.isna(p):
+        return "SEM PREVISAO"
+
+    if p >= 0.90:
+        if conf >= 75:
+            return "PROVAVEL CUMPRIMENTO >=90%"
+        return "PROVAVEL, MAS EVIDENCIA FRACA"
+
+    if p >= 0.70:
+        return "ATENCAO"
+
+    if p >= 0.40:
+        return "ALTO RISCO"
+
+    return "CRITICO"
+
+
+# =============================================================================
+# BACKTEST / CALIBRAÇÃO
+# =============================================================================
+
+def evaluate_probability_accuracy(
+    backtest: pd.DataFrame,
+    probability_col: str = "PROB_CUMPRIR_CARIMBO",
+    actual_col: str = "CUMPRIU_CARIMBO_REAL",
+) -> Tuple[pd.DataFrame, dict]:
+    """
+    Mede a acurácia probabilística DE VERDADE quando existir um backtest.
+
+    Esperado:
+    - probability_col: probabilidade prevista (0..1)
+    - actual_col: 1 se cumpriu a tempo, 0 se atrasou
+
+    Retorna:
+    - tabela de calibração por faixa;
+    - Brier Score.
+
+    Exemplo de boa calibração:
+    obras previstas em ~90% cumprem, na prática, ~90% das vezes.
+    """
+    df = backtest[[probability_col, actual_col]].dropna().copy()
+
+    if df.empty:
+        raise ValueError("Backtest vazio.")
+
+    df[probability_col] = df[probability_col].astype(float)
+    df[actual_col] = df[actual_col].astype(int)
+
+    brier = float(
+        np.mean((df[probability_col] - df[actual_col]) ** 2)
+    )
+
+    bins = np.linspace(0, 1, 11)
+    labels = [
+        f"{int(bins[i]*100):02d}-{int(bins[i+1]*100):02d}%"
+        for i in range(len(bins) - 1)
+    ]
+
+    df["FAIXA_PROB"] = pd.cut(
+        df[probability_col],
+        bins=bins,
+        labels=labels,
+        include_lowest=True,
+    )
+
+    calibration = (
+        df.groupby("FAIXA_PROB", observed=True)
+        .agg(
+            N=(actual_col, "size"),
+            PROB_MEDIA=(probability_col, "mean"),
+            TAXA_REAL=(actual_col, "mean"),
+        )
+        .reset_index()
+    )
+
+    calibration["ERRO_CALIBRACAO_PP"] = (
+        (calibration["PROB_MEDIA"] - calibration["TAXA_REAL"]).abs() * 100
+    )
+
+    metrics = {
+        "N_BACKTEST": int(len(df)),
+        "BRIER_SCORE": round(brier, 4),
+        "NOTA": (
+            "Brier menor e melhor. Calibracao e mais importante que "
+            "accuracy simples para uma previsao probabilistica."
+        ),
+    }
+
+    return calibration, metrics
+
+
+# =============================================================================
+# PIPELINE
+# =============================================================================
+
+def build_gold_risk_table(
+    scope: pd.DataFrame,
+    reference: pd.DataFrame,
+    compare: pd.DataFrame,
+    cfg: Config = CFG,
+    as_of: Optional[pd.Timestamp] = None,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    as_of = pd.Timestamp(as_of or date.today())
+
+    logger.info("Reconstruindo permanências de EAP...")
+    intervals = reconstruct_eap_intervals(compare)
+    intervals = attach_current_attributes(intervals, reference)
+
+    logger.info(
+        "Intervalos reconstruídos: %s | válidos para treino: %s",
+        len(intervals),
+        int(intervals["VALID_FOR_TRAINING"].sum()),
+    )
+
+    pools = build_transition_pools(intervals)
+
+    scope_current = current_eap_entry_info(
+        scope=scope,
+        compare=compare,
+        as_of=as_of,
+    )
+
+    rng = np.random.default_rng(cfg.random_seed)
+
+    logger.info(
+        "Rodando Monte Carlo em %s obras (%s simulações por obra)...",
+        len(scope_current),
+        cfg.n_simulations,
+    )
+
+    predictions = []
+    for i, (_, row) in enumerate(scope_current.iterrows(), start=1):
+        pred = simulate_one_work(
+            row=row,
+            pools=pools,
+            as_of=as_of,
+            cfg=cfg,
+            rng=rng,
+        )
+        predictions.append(pred)
+
+        if i % 100 == 0:
+            logger.info("Processadas %s/%s obras", i, len(scope_current))
+
+    pred_df = pd.DataFrame(predictions, index=scope_current.index)
+
+    gold = pd.concat(
+        [scope_current.reset_index(drop=True), pred_df.reset_index(drop=True)],
+        axis=1,
+    )
+
+    gold["CRITERIO_EXECUTIVO"] = gold.apply(executive_status, axis=1)
+    gold["DATA_REFERENCIA_MODELO"] = as_of.normalize()
+
+    # Percentuais amigáveis para BI/Excel
+    gold["PROB_CUMPRIR_CARIMBO_PCT"] = (
+        gold["PROB_CUMPRIR_CARIMBO"] * 100
+    ).round(1)
+    gold["PROB_ATRASAR_PCT"] = (
+        gold["PROB_ATRASAR"] * 100
+    ).round(1)
+
+    return gold, intervals
+
+
+def save_outputs(
+    gold: pd.DataFrame,
+    intervals: pd.DataFrame,
+    cfg: Config = CFG,
+):
+    out = Path(cfg.output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+
+    stamp = pd.Timestamp.today().strftime("%Y%m%d")
+
+    gold_csv = out / f"gold_pmts_risk_{stamp}.csv"
+    intervals_csv = out / f"eap_intervals_{stamp}.csv"
+
+    gold.to_csv(gold_csv, index=False, encoding="utf-8-sig")
+    intervals.to_csv(intervals_csv, index=False, encoding="utf-8-sig")
+
+    logger.info("Gold table: %s", gold_csv)
+    logger.info("Intervalos EAP: %s", intervals_csv)
+
+    return gold_csv, intervals_csv
+
+
+def run_pipeline(
+    read_sql: ReadSQL,
+    cfg: Config = CFG,
+    as_of: Optional[pd.Timestamp] = None,
+):
+    """
+    read_sql deve ser uma função que recebe SQL (str) e retorna DataFrame.
+
+    Exemplo conceitual:
+        run_pipeline(C.read_sql)
+
+    Se o seu objeto C usa outro método:
+        run_pipeline(lambda sql: C.metodo_que_le_sql(sql))
+    """
+    scope, reference, compare = load_data(read_sql, cfg)
+
+    gold, intervals = build_gold_risk_table(
+        scope=scope,
+        reference=reference,
+        compare=compare,
+        cfg=cfg,
+        as_of=as_of,
+    )
+
+    save_outputs(gold, intervals, cfg)
+    return gold, intervals
+
+
+# =============================================================================
+# EXEMPLO DE EXECUÇÃO COM O CONECTOR C
+# =============================================================================
+#
+# O workspace analisado não continha a implementação do Conntomysql/C,
+# então NÃO foi inventada uma assinatura de método.
+#
+# Exemplo:
+#
+# from Conntomysql import Conntomysql
+# C = Conntomysql(...)
+#
+# # Se o seu conector tiver C.read_sql(sql):
+# gold_risk, eap_intervals = run_pipeline(C.read_sql)
+#
+# # Se tiver outro método:
+# gold_risk, eap_intervals = run_pipeline(lambda sql: C.SEUMETODO(sql))
+#
+# display(
+#     gold_risk[
+#         [
+#             "UID_IDPMTS",
+#             "UID_UFSIGLA",
+#             "PMO_PROJETO",
+#             "EAP_AUTOMATICA",
+#             "PMO_CARIMBO_CENTRALIZADO",
+#             "PROB_CUMPRIR_CARIMBO_PCT",
+#             "DATA_P70",
+#             "DATA_P80",
+#             "DATA_P90",
+#             "RISCO",
+#             "MODEL_CONFIDENCE",
+#             "CONFIDENCE_CLASS",
+#             "CRITERIO_EXECUTIVO",
+#         ]
+#     ].sort_values("PROB_CUMPRIR_CARIMBO_PCT")
+# )
