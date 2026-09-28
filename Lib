@@ -1,25 +1,24 @@
 # ============================================================
-# ESTUDO - ATIVAÇÃO -> LIB SITE
-# PMTS | CARIMBO CENTRALIZADO 2026
+# ESTUDO COMPLETO
+# ATIVAÇÃO -> LIB SITE
 #
-# Objetivos:
-#   1. Selecionar obras com PMO_CARIMBO_CENTRALIZADO em 2026
-#   2. Calcular:
-#         REGIONAL_LIB_SITE_R - INTEGRADOR_ATIVACAO_R
-#   3. Criar faixas de 5 em 5 dias
-#   4. Identificar obras:
-#         - 0 a 10 dias
-#         - > 105 dias
-#   5. Procurar padrões de:
-#         - Ampliação
-#         - 5G
-#         - Projeto
-#         - Regional
-#         - UF
-#         - Frequência
-#         - etc.
-#   6. Gerar gráficos
-#   7. Exportar análise para Excel
+# COORTE:
+# PMO_CARIMBO_CENTRALIZADO em 2026
+#
+# LEAD TIME:
+# REGIONAL_LIB_SITE_R - INTEGRADOR_ATIVACAO_R
+#
+# Inclui:
+# - faixas de 5 em 5 dias
+# - 0-10 dias
+# - >105 dias
+# - padrões por atributos PMTS
+# - diferença contra população
+# - lift
+# - combinações de características
+# - PMO_ESCOPO_META por faixa
+# - evolução mensal
+# - exportação Excel
 # ============================================================
 
 
@@ -46,42 +45,30 @@ COL_SITE = "UID_UFSIGLA"
 
 COL_ATIVACAO = "INTEGRADOR_ATIVACAO_R"
 COL_LIB = "REGIONAL_LIB_SITE_R"
-
 COL_CARIMBO = "PMO_CARIMBO_CENTRALIZADO"
+
+COL_CATEGORIA = "PMO_ESCOPO_META"
 
 
 DATA_INICIO = "2026-01-01"
 DATA_FIM = "2027-01-01"
 
-
 LIMITE_RAPIDO = 10
 LIMITE_LONGO = 105
 
-LIMITE_PADRAO_FORTE = 90
-
-# Evita chamar de "padrão" algo baseado em 1 ou 2 obras
 MIN_OBRAS_PADRAO = 10
 
 
 ARQUIVO_EXCEL = "estudo_ativacao_lib_site_2026.xlsx"
 
-GRAFICO_DISTRIBUICAO = "01_distribuicao_faixas.png"
-GRAFICO_EVOLUCAO = "02_evolucao_mensal.png"
-GRAFICO_EXTREMOS = "03_percentual_extremos_mensal.png"
-
 
 # ============================================================
-# 1. LEITURA DA PMTS
-# ============================================================
-#
-# O ano de interesse vem do CARIMBO CENTRALIZADO.
-#
-# Não estamos filtrando pelo ano da ativação nem da LIB.
+# 1. LEITURA
 # ============================================================
 
-print("=" * 70)
+print("=" * 80)
 print("LENDO PMTS")
-print("=" * 70)
+print("=" * 80)
 
 
 df = c.read_sql(
@@ -96,7 +83,6 @@ df = c.read_sql(
 )
 
 
-# Padronizar nomes das colunas
 df.columns = [
     str(col).strip().upper()
     for col in df.columns
@@ -107,10 +93,10 @@ print(f"Linhas recebidas: {len(df):,}")
 
 
 # ============================================================
-# 2. VALIDAR COLUNAS PRINCIPAIS
+# 2. VALIDAR COLUNAS
 # ============================================================
 
-colunas_obrigatorias = [
+obrigatorias = [
     COL_ID,
     COL_SITE,
     COL_ATIVACAO,
@@ -121,7 +107,7 @@ colunas_obrigatorias = [
 
 faltantes = [
     col
-    for col in colunas_obrigatorias
+    for col in obrigatorias
     if col not in df.columns
 ]
 
@@ -129,24 +115,21 @@ faltantes = [
 if faltantes:
 
     raise ValueError(
-        "As seguintes colunas não foram encontradas:\n"
+        "Colunas obrigatórias ausentes:\n"
         + "\n".join(faltantes)
     )
 
 
 # ============================================================
-# 3. CONVERTER DATAS
+# 3. DATAS
 # ============================================================
 
-colunas_data = [
+for col in [
     COL_ATIVACAO,
     COL_LIB,
     COL_CARIMBO,
     "DATA_MODIFICACAO"
-]
-
-
-for col in colunas_data:
+]:
 
     if col in df.columns:
 
@@ -157,14 +140,10 @@ for col in colunas_data:
 
 
 # ============================================================
-# 4. GARANTIR UMA LINHA POR OBRA
-# ============================================================
-#
-# Se houver duplicidade de UID_IDPMTS,
-# priorizamos a linha mais recente.
+# 4. UMA LINHA POR OBRA
 # ============================================================
 
-qtd_ids_duplicados = (
+duplicados = (
     df.loc[
         df.duplicated(
             subset=[COL_ID],
@@ -177,8 +156,7 @@ qtd_ids_duplicados = (
 
 
 print(
-    f"UID_IDPMTS com duplicidade: "
-    f"{qtd_ids_duplicados:,}"
+    f"IDPMTS duplicados: {duplicados:,}"
 )
 
 
@@ -207,19 +185,16 @@ else:
 
 
 print(
-    f"Obras únicas com carimbo 2026: "
-    f"{df[COL_ID].nunique():,}"
+    f"Obras únicas: {df[COL_ID].nunique():,}"
 )
 
-
 print(
-    f"Sites únicos com carimbo 2026: "
-    f"{df[COL_SITE].nunique():,}"
+    f"Sites únicos: {df[COL_SITE].nunique():,}"
 )
 
 
 # ============================================================
-# 5. OBRAS SEM ALGUMA DAS DATAS
+# 5. SEPARAR QUEM NÃO TEM AS DUAS DATAS
 # ============================================================
 
 df_sem_data = df[
@@ -236,33 +211,14 @@ df_analise = df[
 ].copy()
 
 
-print()
-print(
-    f"Obras com Ativação + LIB: "
-    f"{df_analise[COL_ID].nunique():,}"
-)
-
-
-print(
-    f"Obras sem alguma das datas: "
-    f"{df_sem_data[COL_ID].nunique():,}"
-)
-
-
 # ============================================================
-# 6. CALCULAR TEMPO
+# 6. LEAD TIME
 # ============================================================
 #
-# IMPORTANTE:
+# CORRETO:
 #
-#     LIB SITE - ATIVAÇÃO
+# LIB - ATIVAÇÃO
 #
-# Exemplo:
-#
-# Ativação = 10/03
-# LIB       = 20/03
-#
-# Resultado = 10 dias
 # ============================================================
 
 df_analise["DIAS_ATIVACAO_ATE_LIB"] = (
@@ -273,14 +229,7 @@ df_analise["DIAS_ATIVACAO_ATE_LIB"] = (
 
 
 # ============================================================
-# 7. SEPARAR RESULTADOS NEGATIVOS
-# ============================================================
-#
-# Se der negativo:
-#
-# LIB aconteceu antes da Ativação.
-#
-# Não usamos abs(), pois isso esconderia esse comportamento.
+# 7. NEGATIVOS
 # ============================================================
 
 df_negativos = df_analise[
@@ -293,29 +242,25 @@ df_valido = df_analise[
 ].copy()
 
 
+print()
 print(
-    f"Obras com diferença negativa: "
+    f"Com as duas datas: "
+    f"{df_analise[COL_ID].nunique():,}"
+)
+
+print(
+    f"Negativos: "
     f"{df_negativos[COL_ID].nunique():,}"
 )
 
-
 print(
-    f"Obras válidas no estudo: "
+    f"Válidos: "
     f"{df_valido[COL_ID].nunique():,}"
 )
 
 
 # ============================================================
-# 8. CRIAR FAIXAS DE 5 EM 5 DIAS
-# ============================================================
-#
-# 0-5
-# 6-10
-# 11-15
-# 16-20
-# ...
-# 101-105
-# >105
+# 8. FAIXAS DE 5 EM 5
 # ============================================================
 
 def criar_faixa(dias):
@@ -325,8 +270,8 @@ def criar_faixa(dias):
 
     dias = int(dias)
 
-    if dias > LIMITE_LONGO:
-        return f">{LIMITE_LONGO}"
+    if dias > 105:
+        return ">105"
 
     if dias <= 5:
         return "0-5"
@@ -342,8 +287,6 @@ df_valido["FAIXA_DIAS"] = (
     .apply(criar_faixa)
 )
 
-
-# Ordem correta das faixas
 
 ordem_faixas = ["0-5"]
 
@@ -364,7 +307,7 @@ df_valido["FAIXA_DIAS"] = pd.Categorical(
 
 
 # ============================================================
-# 9. DISTRIBUIÇÃO POR FAIXA
+# 9. DISTRIBUIÇÃO
 # ============================================================
 
 distribuicao = (
@@ -405,14 +348,16 @@ distribuicao["PCT_ACUMULADO"] = (
 # 10. ESTATÍSTICAS
 # ============================================================
 
-dias = df_valido["DIAS_ATIVACAO_ATE_LIB"]
+serie = df_valido[
+    "DIAS_ATIVACAO_ATE_LIB"
+]
 
 
 estatisticas = pd.DataFrame({
 
     "METRICA": [
-        "Obras analisadas",
-        "Sites únicos",
+        "Obras",
+        "Sites",
         "Média",
         "Mediana",
         "P10",
@@ -427,15 +372,15 @@ estatisticas = pd.DataFrame({
     "VALOR": [
         total_obras,
         total_sites,
-        round(dias.mean(), 2),
-        round(dias.median(), 2),
-        round(dias.quantile(0.10), 2),
-        round(dias.quantile(0.25), 2),
-        round(dias.quantile(0.50), 2),
-        round(dias.quantile(0.75), 2),
-        round(dias.quantile(0.90), 2),
-        round(dias.quantile(0.95), 2),
-        dias.max()
+        round(serie.mean(), 2),
+        round(serie.median(), 2),
+        round(serie.quantile(.10), 2),
+        round(serie.quantile(.25), 2),
+        round(serie.quantile(.50), 2),
+        round(serie.quantile(.75), 2),
+        round(serie.quantile(.90), 2),
+        round(serie.quantile(.95), 2),
+        serie.max()
     ]
 
 })
@@ -446,76 +391,33 @@ estatisticas = pd.DataFrame({
 # ============================================================
 
 df_rapidas = df_valido[
-    df_valido["DIAS_ATIVACAO_ATE_LIB"]
-    .between(
+    df_valido[
+        "DIAS_ATIVACAO_ATE_LIB"
+    ].between(
         0,
-        LIMITE_RAPIDO,
+        10,
         inclusive="both"
     )
 ].copy()
 
 
 df_longas = df_valido[
-    df_valido["DIAS_ATIVACAO_ATE_LIB"]
-    > LIMITE_LONGO
+    df_valido[
+        "DIAS_ATIVACAO_ATE_LIB"
+    ] > 105
 ].copy()
 
 
-qtd_rapidas = df_rapidas[COL_ID].nunique()
-qtd_longas = df_longas[COL_ID].nunique()
-
-
 # ============================================================
-# 12. RESUMO
+# 12. FLAGS ANALÍTICAS
 # ============================================================
 
-resumo = pd.DataFrame({
-
-    "GRUPO": [
-        "TOTAL VÁLIDO",
-        "0-10 DIAS",
-        ">105 DIAS",
-        "NEGATIVOS",
-        "SEM ALGUMA DATA"
-    ],
-
-    "OBRAS": [
-        total_obras,
-        qtd_rapidas,
-        qtd_longas,
-        df_negativos[COL_ID].nunique(),
-        df_sem_data[COL_ID].nunique()
-    ],
-
-    "SITES": [
-        total_sites,
-        df_rapidas[COL_SITE].nunique(),
-        df_longas[COL_SITE].nunique(),
-        df_negativos[COL_SITE].nunique(),
-        df_sem_data[COL_SITE].nunique()
-    ]
-})
-
-
-resumo["PCT_SOBRE_VALIDAS"] = (
-    resumo["OBRAS"]
-    /
-    max(total_obras, 1)
-    *
-    100
-).round(2)
-
-
-# ============================================================
-# 13. CRIAR FLAG 5G
-# ============================================================
-
-def classificar_5g(valor):
+def flag_5g(valor):
 
     if pd.isna(valor):
         return "SEM INFORMACAO"
 
-    texto = str(valor).upper().strip()
+    texto = str(valor).upper()
 
     if "5G" in texto:
         return "TEM 5G"
@@ -523,29 +425,7 @@ def classificar_5g(valor):
     return "NAO TEM 5G"
 
 
-if "PMO_TECN_EQUIP" in df_valido.columns:
-
-    df_valido["FLAG_5G"] = (
-        df_valido["PMO_TECN_EQUIP"]
-        .apply(classificar_5g)
-    )
-
-    df_rapidas["FLAG_5G"] = (
-        df_rapidas["PMO_TECN_EQUIP"]
-        .apply(classificar_5g)
-    )
-
-    df_longas["FLAG_5G"] = (
-        df_longas["PMO_TECN_EQUIP"]
-        .apply(classificar_5g)
-    )
-
-
-# ============================================================
-# 14. CRIAR CLASSIFICAÇÃO DE INTERVENÇÃO
-# ============================================================
-
-def classificar_intervencao(valor):
+def tipo_intervencao(valor):
 
     if pd.isna(valor):
         return "SEM INFORMACAO"
@@ -555,56 +435,60 @@ def classificar_intervencao(valor):
     if "AMPL" in texto:
         return "AMPLIACAO"
 
-    if texto == "SN" or "SITE NOVO" in texto:
+    if "SN" in texto:
         return "SN"
 
     return texto
 
 
-if "PMO_TIPO_INTERV" in df_valido.columns:
+for dataframe in [
+    df_valido,
+    df_rapidas,
+    df_longas
+]:
 
-    df_valido["TIPO_INTERVENCAO_ANALISE"] = (
-        df_valido["PMO_TIPO_INTERV"]
-        .apply(classificar_intervencao)
-    )
+    if "PMO_TECN_EQUIP" in dataframe.columns:
 
-    df_rapidas["TIPO_INTERVENCAO_ANALISE"] = (
-        df_rapidas["PMO_TIPO_INTERV"]
-        .apply(classificar_intervencao)
-    )
+        dataframe["FLAG_5G"] = (
+            dataframe["PMO_TECN_EQUIP"]
+            .apply(flag_5g)
+        )
 
-    df_longas["TIPO_INTERVENCAO_ANALISE"] = (
-        df_longas["PMO_TIPO_INTERV"]
-        .apply(classificar_intervencao)
-    )
+
+    if "PMO_TIPO_INTERV" in dataframe.columns:
+
+        dataframe[
+            "TIPO_INTERVENCAO_ANALISE"
+        ] = (
+            dataframe["PMO_TIPO_INTERV"]
+            .apply(tipo_intervencao)
+        )
 
 
 # ============================================================
-# 15. VARIÁVEIS PARA BUSCAR PADRÕES
+# 13. CAMPOS PARA PROCURAR PADRÕES
 # ============================================================
 
 candidatas = [
 
-    "TIPO_INTERVENCAO_ANALISE",
-    "PMO_TIPO_INTERV",
-
-    "FLAG_5G",
-    "PMO_TECN_EQUIP",
-    "PMO_FREQ_EQUIP",
+    "PMO_ESCOPO_META",
 
     "PMO_PROJETO",
-    "PROJETO",
-    "PROJETO_5G",
-    "PROJETO_MARKETING",
 
-    "PMO_ESCOPO_META",
-    "PMO_ROLLOUT_OBVK",
+    "PMO_TIPO_INTERV",
+    "TIPO_INTERVENCAO_ANALISE",
+
+    "PMO_TECN_EQUIP",
+    "FLAG_5G",
+
+    "PMO_FREQ_EQUIP",
 
     "MASTEROBRA_OBJ_ENG",
     "MASTEROBRA_STATUS_ROLLOUT",
 
+    "PMO_ROLLOUT_OBVK",
+
     "PMO_REGIONAL",
-    "REGIONAL",
     "PMO_UF",
 
     "VENDOR_EQUIPAMENTO",
@@ -615,29 +499,81 @@ candidatas = [
 ]
 
 
-variaveis = []
-
-for col in candidatas:
-
-    if (
-        col in df_valido.columns
-        and col not in variaveis
-    ):
-
-        variaveis.append(col)
-
-
-print()
-print("=" * 70)
-print("VARIÁVEIS UTILIZADAS NA BUSCA DE PADRÕES")
-print("=" * 70)
-
-for col in variaveis:
-    print(col)
+variaveis = [
+    col
+    for col in candidatas
+    if col in df_valido.columns
+]
 
 
 # ============================================================
-# 16. FUNÇÃO PARA IDENTIFICAR PADRÕES
+# 14. CLASSIFICAÇÃO DESCRITIVA DO SINAL
+# ============================================================
+#
+# IMPORTANTE:
+#
+# Isso NÃO significa causalidade.
+#
+# Serve para destacar:
+# - concentração absoluta
+# - sobre-representação
+# - sub-representação
+#
+# ============================================================
+
+def classificar_sinal(row):
+
+    pct = row["PCT_GRUPO"]
+    dif = row["DIFERENCA_PP"]
+    lift = row["LIFT"]
+    n = row["OBRAS_GRUPO"]
+
+
+    if n < MIN_OBRAS_PADRAO:
+        return "AMOSTRA PEQUENA"
+
+
+    # 90% ou mais do grupo
+    if pct >= 90:
+        return "CONCENTRACAO >=90%"
+
+
+    # Muito acima da incidência normal
+    if (
+        dif >= 15
+        or
+        (
+            lift >= 2
+            and pct >= 10
+        )
+    ):
+        return "SOBRE-REPRESENTADO FORTE"
+
+
+    if (
+        dif >= 7
+        or
+        (
+            lift >= 1.5
+            and pct >= 5
+        )
+    ):
+        return "SOBRE-REPRESENTADO"
+
+
+    if dif <= -10:
+        return "SUB-REPRESENTADO FORTE"
+
+
+    if dif <= -7:
+        return "SUB-REPRESENTADO"
+
+
+    return "SEM DESVIO FORTE"
+
+
+# ============================================================
+# 15. FUNÇÃO DE ANÁLISE
 # ============================================================
 
 def analisar_padrao(
@@ -732,6 +668,7 @@ def analisar_padrao(
 
 
     resultado["LIFT"] = np.where(
+
         resultado["PCT_BASE"] > 0,
 
         resultado["PCT_GRUPO"]
@@ -739,6 +676,7 @@ def analisar_padrao(
         resultado["PCT_BASE"],
 
         np.nan
+
     )
 
 
@@ -751,8 +689,7 @@ def analisar_padrao(
     resultado["PADRAO_90"] = np.where(
 
         (
-            resultado["PCT_GRUPO"]
-            >= LIMITE_PADRAO_FORTE
+            resultado["PCT_GRUPO"] >= 90
         )
         &
         (
@@ -763,6 +700,14 @@ def analisar_padrao(
         "SIM",
 
         "NAO"
+    )
+
+
+    resultado["SINAL_DESCRITIVO"] = (
+        resultado.apply(
+            classificar_sinal,
+            axis=1
+        )
     )
 
 
@@ -787,24 +732,30 @@ def analisar_padrao(
     )
 
 
-    return (
+    resultado["ABS_DIF"] = (
+        resultado["DIFERENCA_PP"]
+        .abs()
+    )
+
+
+    resultado = (
         resultado
         .sort_values(
-            [
-                "PCT_GRUPO",
-                "OBRAS_GRUPO"
-            ],
-            ascending=[
-                False,
-                False
-            ]
+            "ABS_DIF",
+            ascending=False
+        )
+        .drop(
+            columns="ABS_DIF"
         )
         .reset_index(drop=True)
     )
 
 
+    return resultado
+
+
 # ============================================================
-# 17. RODAR ANÁLISE DOS EXTREMOS
+# 16. EXECUTAR ANÁLISE
 # ============================================================
 
 resultados_rapidas = []
@@ -813,7 +764,7 @@ resultados_longas = []
 
 for coluna in variaveis:
 
-    r1 = analisar_padrao(
+    r_rapida = analisar_padrao(
         df_rapidas,
         df_valido,
         coluna,
@@ -821,7 +772,7 @@ for coluna in variaveis:
     )
 
 
-    r2 = analisar_padrao(
+    r_longa = analisar_padrao(
         df_longas,
         df_valido,
         coluna,
@@ -829,101 +780,55 @@ for coluna in variaveis:
     )
 
 
-    if not r1.empty:
-        resultados_rapidas.append(r1)
+    if not r_rapida.empty:
+        resultados_rapidas.append(
+            r_rapida
+        )
 
 
-    if not r2.empty:
-        resultados_longas.append(r2)
+    if not r_longa.empty:
+        resultados_longas.append(
+            r_longa
+        )
 
 
-if resultados_rapidas:
-
-    analise_rapidas = pd.concat(
+analise_rapidas = (
+    pd.concat(
         resultados_rapidas,
         ignore_index=True
     )
+    if resultados_rapidas
+    else pd.DataFrame()
+)
 
-else:
 
-    analise_rapidas = pd.DataFrame()
-
-
-if resultados_longas:
-
-    analise_longas = pd.concat(
+analise_longas = (
+    pd.concat(
         resultados_longas,
         ignore_index=True
     )
-
-else:
-
-    analise_longas = pd.DataFrame()
-
-
-# ============================================================
-# 18. PADRÕES >= 90%
-# ============================================================
-
-if not analise_rapidas.empty:
-
-    padroes_90_rapidas = (
-        analise_rapidas[
-            analise_rapidas["PADRAO_90"]
-            == "SIM"
-        ]
-        .copy()
-    )
-
-else:
-
-    padroes_90_rapidas = pd.DataFrame()
-
-
-if not analise_longas.empty:
-
-    padroes_90_longas = (
-        analise_longas[
-            analise_longas["PADRAO_90"]
-            == "SIM"
-        ]
-        .copy()
-    )
-
-else:
-
-    padroes_90_longas = pd.DataFrame()
+    if resultados_longas
+    else pd.DataFrame()
+)
 
 
 # ============================================================
-# 19. MAIORES DIFERENÇAS CONTRA A POPULAÇÃO
-# ============================================================
-#
-# Isso é importante porque nem todo padrão interessante
-# necessariamente chega a 90%.
-#
-# Exemplo:
-#
-# 5G:
-# população total = 30%
-# >105 dias       = 70%
-#
-# diferença = +40 pontos percentuais
+# 17. ORDENAR GLOBALMENTE POR DESVIO
 # ============================================================
 
-def top_diferencas(resultado):
+def ordenar_desvios(df_resultado):
 
-    if resultado.empty:
-        return pd.DataFrame()
+    if df_resultado.empty:
+        return df_resultado
 
 
-    temp = resultado[
-        resultado["OBRAS_GRUPO"]
+    temp = df_resultado[
+        df_resultado["OBRAS_GRUPO"]
         >= MIN_OBRAS_PADRAO
     ].copy()
 
 
-    temp["DIF_ABS"] = (
+    temp["ABS_DIF"] = (
         temp["DIFERENCA_PP"]
         .abs()
     )
@@ -932,11 +837,11 @@ def top_diferencas(resultado):
     temp = (
         temp
         .sort_values(
-            "DIF_ABS",
+            "ABS_DIF",
             ascending=False
         )
         .drop(
-            columns=["DIF_ABS"]
+            columns="ABS_DIF"
         )
         .reset_index(drop=True)
     )
@@ -945,21 +850,187 @@ def top_diferencas(resultado):
     return temp
 
 
-top_rapidas = top_diferencas(
+top_rapidas = ordenar_desvios(
     analise_rapidas
 )
 
 
-top_longas = top_diferencas(
+top_longas = ordenar_desvios(
     analise_longas
 )
 
 
 # ============================================================
-# 20. EVOLUÇÃO MENSAL
+# 18. SÓ SINAIS RELEVANTES
+# ============================================================
+
+sinais_rapidas = (
+    top_rapidas[
+        top_rapidas["SINAL_DESCRITIVO"]
+        != "SEM DESVIO FORTE"
+    ]
+    .copy()
+)
+
+
+sinais_longas = (
+    top_longas[
+        top_longas["SINAL_DESCRITIVO"]
+        != "SEM DESVIO FORTE"
+    ]
+    .copy()
+)
+
+
+# ============================================================
+# 19. ANÁLISE DE COMBINAÇÕES
 # ============================================================
 #
-# O eixo temporal será o PMO_CARIMBO_CENTRALIZADO.
+# Pode existir padrão conjunto mesmo sem nenhuma
+# variável individual chegar perto de 90%.
+#
+# Ex:
+# OUTROS + 4G
+# OUTROS + FÍSICA
+# 6.OUTROS + 4G
+#
+# ============================================================
+
+def analisar_combinacao(
+    df_grupo,
+    df_total,
+    colunas,
+    nome_grupo
+):
+
+    if not all(
+        col in df_total.columns
+        for col in colunas
+    ):
+        return pd.DataFrame()
+
+
+    grupo = df_grupo.copy()
+    total = df_total.copy()
+
+
+    for col in colunas:
+
+        grupo[col] = (
+            grupo[col]
+            .fillna("SEM INFORMACAO")
+            .astype(str)
+            .str.strip()
+        )
+
+
+        total[col] = (
+            total[col]
+            .fillna("SEM INFORMACAO")
+            .astype(str)
+            .str.strip()
+        )
+
+
+    grupo["COMBINACAO"] = (
+        grupo[colunas]
+        .agg(" | ".join, axis=1)
+    )
+
+
+    total["COMBINACAO"] = (
+        total[colunas]
+        .agg(" | ".join, axis=1)
+    )
+
+
+    resultado = analisar_padrao(
+        grupo,
+        total,
+        "COMBINACAO",
+        nome_grupo
+    )
+
+
+    if not resultado.empty:
+
+        resultado["VARIAVEL"] = (
+            " + ".join(colunas)
+        )
+
+
+    return resultado
+
+
+combinacoes = [
+
+    [
+        "PMO_PROJETO",
+        "PMO_TECN_EQUIP"
+    ],
+
+    [
+        "PMO_PROJETO",
+        "PMO_TIPO_INTERV"
+    ],
+
+    [
+        "PMO_PROJETO",
+        "PMO_ESCOPO_META"
+    ],
+
+    [
+        "PMO_TIPO_INTERV",
+        "PMO_TECN_EQUIP"
+    ],
+
+    [
+        "PMO_ESCOPO_META",
+        "PMO_TECN_EQUIP"
+    ],
+
+    [
+        "PMO_REGIONAL",
+        "PMO_TECN_EQUIP"
+    ]
+]
+
+
+resultado_combinacoes_longas = []
+
+
+for cols in combinacoes:
+
+    r = analisar_combinacao(
+        df_longas,
+        df_valido,
+        cols,
+        ">105 DIAS"
+    )
+
+    if not r.empty:
+        resultado_combinacoes_longas.append(r)
+
+
+if resultado_combinacoes_longas:
+
+    combinacoes_longas = pd.concat(
+        resultado_combinacoes_longas,
+        ignore_index=True
+    )
+
+
+    combinacoes_longas = ordenar_desvios(
+        combinacoes_longas
+    )
+
+else:
+
+    combinacoes_longas = pd.DataFrame()
+
+
+# ============================================================
+# 20. EVOLUÇÃO MENSAL
 # ============================================================
 
 df_valido["MES_CARIMBO"] = (
@@ -996,12 +1067,12 @@ evolucao_mensal = (
 
         P90_DIAS=(
             "DIAS_ATIVACAO_ATE_LIB",
-            lambda x: x.quantile(0.90)
+            lambda x: x.quantile(.90)
         ),
 
         P95_DIAS=(
             "DIAS_ATIVACAO_ATE_LIB",
-            lambda x: x.quantile(0.95)
+            lambda x: x.quantile(.95)
         )
 
     )
@@ -1023,30 +1094,27 @@ for col in [
 
 
 # ============================================================
-# 21. CLASSIFICAÇÃO DOS GRUPOS PARA EVOLUÇÃO
+# 21. GRUPOS DE TEMPO MENSAIS
 # ============================================================
 
-def classificar_grupo_tempo(dias):
+def grupo_tempo(dias):
 
     if dias <= 10:
         return "0-10"
 
-    elif dias <= 105:
+    if dias <= 105:
         return "11-105"
 
-    else:
-        return ">105"
+    return ">105"
 
 
 df_valido["GRUPO_TEMPO"] = (
-    df_valido["DIAS_ATIVACAO_ATE_LIB"]
-    .apply(classificar_grupo_tempo)
+    df_valido[
+        "DIAS_ATIVACAO_ATE_LIB"
+    ]
+    .apply(grupo_tempo)
 )
 
-
-# ============================================================
-# 22. PERCENTUAL DOS GRUPOS POR MÊS
-# ============================================================
 
 extremos_mensal = (
     df_valido
@@ -1089,109 +1157,220 @@ extremos_mensal["PERCENTUAL"] = (
 ).round(2)
 
 
-# Pivot para gráfico
+# ============================================================
+# 22. PMO_ESCOPO_META POR FAIXA
+# ============================================================
 
-extremos_pivot = (
-    extremos_mensal
-    .pivot(
-        index="MES_CARIMBO",
-        columns="GRUPO_TEMPO",
-        values="PERCENTUAL"
+if COL_CATEGORIA in df_valido.columns:
+
+    df_valido[COL_CATEGORIA] = (
+        df_valido[COL_CATEGORIA]
+        .fillna("SEM INFORMACAO")
+        .astype(str)
+        .str.strip()
+        .str.upper()
     )
-    .fillna(0)
-    .reset_index()
-)
 
 
-# Garantir que as 3 colunas existam
+    distribuicao_categoria = (
+        df_valido
+        .groupby(
+            [
+                "FAIXA_DIAS",
+                COL_CATEGORIA
+            ],
+            observed=False
+        )
+        .agg(
+            OBRAS=(COL_ID, "nunique")
+        )
+        .reset_index()
+    )
 
-for col in [
-    "0-10",
-    "11-105",
-    ">105"
-]:
 
-    if col not in extremos_pivot.columns:
-        extremos_pivot[col] = 0
+    pivot_categoria = (
+        distribuicao_categoria
+        .pivot(
+            index="FAIXA_DIAS",
+            columns=COL_CATEGORIA,
+            values="OBRAS"
+        )
+        .fillna(0)
+        .reindex(ordem_faixas)
+        .fillna(0)
+    )
+
+
+    pivot_categoria_pct = (
+        pivot_categoria
+        .div(
+            pivot_categoria.sum(axis=1),
+            axis=0
+        )
+        *
+        100
+    )
+
+else:
+
+    distribuicao_categoria = pd.DataFrame()
+    pivot_categoria = pd.DataFrame()
+    pivot_categoria_pct = pd.DataFrame()
 
 
 # ============================================================
 # 23. GRÁFICO 1
-# DISTRIBUIÇÃO DAS FAIXAS DE 5 DIAS
+# QUANTIDADE POR FAIXA + PMO_ESCOPO_META
 # ============================================================
 
-plt.figure(
-    figsize=(16, 7)
-)
+if not pivot_categoria.empty:
+
+    ax = pivot_categoria.plot(
+        kind="bar",
+        stacked=True,
+        figsize=(17, 8)
+    )
 
 
-plt.bar(
-    distribuicao["FAIXA_DIAS"].astype(str),
-    distribuicao["OBRAS"]
-)
+    plt.title(
+        "Distribuição do tempo entre Ativação e LIB Site por Escopo Meta\n"
+        "Carimbo Centralizado 2026"
+    )
 
 
-plt.title(
-    "Distribuição do tempo entre Ativação e LIB Site\n"
-    "Obras com Carimbo Centralizado em 2026"
-)
+    plt.xlabel(
+        "Dias entre Ativação e LIB Site"
+    )
 
 
-plt.xlabel(
-    "Dias entre Ativação e LIB Site"
-)
+    plt.ylabel(
+        "Quantidade de obras"
+    )
 
 
-plt.ylabel(
-    "Quantidade de obras"
-)
+    plt.xticks(
+        rotation=45,
+        ha="right"
+    )
 
 
-plt.xticks(
-    rotation=45,
-    ha="right"
-)
+    plt.legend(
+        title="PMO_ESCOPO_META",
+        bbox_to_anchor=(1.02, 1),
+        loc="upper left"
+    )
 
 
-plt.grid(
-    axis="y",
-    alpha=0.3
-)
+    plt.grid(
+        axis="y",
+        alpha=.3
+    )
 
 
-# Número em cima de cada barra
-for i, valor in enumerate(
-    distribuicao["OBRAS"]
-):
-
-    if valor > 0:
-
-        plt.text(
-            i,
-            valor,
-            str(valor),
-            ha="center",
-            va="bottom",
-            fontsize=8
-        )
+    totais = (
+        pivot_categoria
+        .sum(axis=1)
+    )
 
 
-plt.tight_layout()
+    for i, total in enumerate(totais):
+
+        if total > 0:
+
+            ax.text(
+                i,
+                total,
+                f"{int(total)}",
+                ha="center",
+                va="bottom",
+                fontsize=8
+            )
 
 
-plt.savefig(
-    GRAFICO_DISTRIBUICAO,
-    dpi=200,
-    bbox_inches="tight"
-)
+    plt.tight_layout()
 
 
-plt.show()
+    plt.savefig(
+        "01_faixas_por_escopo.png",
+        dpi=200,
+        bbox_inches="tight"
+    )
+
+
+    plt.show()
 
 
 # ============================================================
 # 24. GRÁFICO 2
-# MEDIANA E P90 AO LONGO DOS MESES
+# COMPOSIÇÃO % PMO_ESCOPO_META
+# ============================================================
+
+if not pivot_categoria_pct.empty:
+
+    ax = pivot_categoria_pct.plot(
+        kind="bar",
+        stacked=True,
+        figsize=(17, 8)
+    )
+
+
+    plt.title(
+        "Composição do Escopo Meta por tempo entre Ativação e LIB Site\n"
+        "Carimbo Centralizado 2026"
+    )
+
+
+    plt.xlabel(
+        "Dias entre Ativação e LIB Site"
+    )
+
+
+    plt.ylabel(
+        "% das obras"
+    )
+
+
+    plt.ylim(
+        0,
+        100
+    )
+
+
+    plt.xticks(
+        rotation=45,
+        ha="right"
+    )
+
+
+    plt.legend(
+        title="PMO_ESCOPO_META",
+        bbox_to_anchor=(1.02, 1),
+        loc="upper left"
+    )
+
+
+    plt.grid(
+        axis="y",
+        alpha=.3
+    )
+
+
+    plt.tight_layout()
+
+
+    plt.savefig(
+        "02_percentual_escopo_por_faixa.png",
+        dpi=200,
+        bbox_inches="tight"
+    )
+
+
+    plt.show()
+
+
+# ============================================================
+# 25. GRÁFICO 3
+# EVOLUÇÃO DA MEDIANA E P90
 # ============================================================
 
 plt.figure(
@@ -1203,7 +1382,6 @@ plt.plot(
     evolucao_mensal["MES_CARIMBO"],
     evolucao_mensal["MEDIANA_DIAS"],
     marker="o",
-    linewidth=2,
     label="Mediana"
 )
 
@@ -1212,7 +1390,6 @@ plt.plot(
     evolucao_mensal["MES_CARIMBO"],
     evolucao_mensal["P90_DIAS"],
     marker="o",
-    linewidth=2,
     label="P90"
 )
 
@@ -1238,7 +1415,7 @@ plt.xticks(
 
 
 plt.grid(
-    alpha=0.3
+    alpha=.3
 )
 
 
@@ -1249,7 +1426,7 @@ plt.tight_layout()
 
 
 plt.savefig(
-    GRAFICO_EVOLUCAO,
+    "03_evolucao_mensal.png",
     dpi=200,
     bbox_inches="tight"
 )
@@ -1259,13 +1436,133 @@ plt.show()
 
 
 # ============================================================
-# 25. GRÁFICO 3
-# PERCENTUAL DE 0-10 / 11-105 / >105 POR MÊS
+# 26. GRÁFICO 4
+# TOP DESVIOS DO GRUPO >105
+# ============================================================
+#
+# Aqui está o gráfico que ajuda quando nenhum campo chega
+# a 90%.
+#
+# Positivo = mais comum nos >105 do que na base.
+# Negativo = menos comum nos >105 do que na base.
 # ============================================================
 
-plt.figure(
-    figsize=(14, 7)
+if not top_longas.empty:
+
+    grafico_desvios = (
+        top_longas[
+            top_longas["OBRAS_GRUPO"]
+            >= MIN_OBRAS_PADRAO
+        ]
+        .copy()
+    )
+
+
+    grafico_desvios["ABS_DIF"] = (
+        grafico_desvios[
+            "DIFERENCA_PP"
+        ]
+        .abs()
+    )
+
+
+    grafico_desvios = (
+        grafico_desvios
+        .nlargest(
+            15,
+            "ABS_DIF"
+        )
+        .sort_values(
+            "DIFERENCA_PP"
+        )
+    )
+
+
+    grafico_desvios["LABEL"] = (
+        grafico_desvios["VARIAVEL"]
+        +
+        " | "
+        +
+        grafico_desvios["CATEGORIA"]
+    )
+
+
+    plt.figure(
+        figsize=(13, 9)
+    )
+
+
+    plt.barh(
+        grafico_desvios["LABEL"],
+        grafico_desvios["DIFERENCA_PP"]
+    )
+
+
+    plt.axvline(
+        0,
+        linewidth=1
+    )
+
+
+    plt.title(
+        "Características mais diferentes da base nas obras >105 dias"
+    )
+
+
+    plt.xlabel(
+        "Diferença em pontos percentuais vs. população total"
+    )
+
+
+    plt.ylabel(
+        ""
+    )
+
+
+    plt.grid(
+        axis="x",
+        alpha=.3
+    )
+
+
+    plt.tight_layout()
+
+
+    plt.savefig(
+        "04_desvios_maior_105.png",
+        dpi=200,
+        bbox_inches="tight"
+    )
+
+
+    plt.show()
+
+
+# ============================================================
+# 27. GRÁFICO 5
+# % 0-10 / 11-105 / >105 POR MÊS
+# ============================================================
+
+extremos_pivot = (
+    extremos_mensal
+    .pivot(
+        index="MES_CARIMBO",
+        columns="GRUPO_TEMPO",
+        values="PERCENTUAL"
+    )
+    .fillna(0)
+    .reset_index()
 )
+
+
+for col in [
+    "0-10",
+    "11-105",
+    ">105"
+]:
+
+    if col not in extremos_pivot.columns:
+        extremos_pivot[col] = 0
 
 
 x = np.arange(
@@ -1273,30 +1570,35 @@ x = np.arange(
 )
 
 
-parte_1 = extremos_pivot["0-10"]
-parte_2 = extremos_pivot["11-105"]
-parte_3 = extremos_pivot[">105"]
+p1 = extremos_pivot["0-10"]
+p2 = extremos_pivot["11-105"]
+p3 = extremos_pivot[">105"]
+
+
+plt.figure(
+    figsize=(14, 7)
+)
 
 
 plt.bar(
     x,
-    parte_1,
+    p1,
     label="0-10 dias"
 )
 
 
 plt.bar(
     x,
-    parte_2,
-    bottom=parte_1,
+    p2,
+    bottom=p1,
     label="11-105 dias"
 )
 
 
 plt.bar(
     x,
-    parte_3,
-    bottom=parte_1 + parte_2,
+    p3,
+    bottom=p1 + p2,
     label=">105 dias"
 )
 
@@ -1314,11 +1616,6 @@ plt.ylim(
 )
 
 
-plt.title(
-    "Distribuição percentual do tempo Ativação → LIB Site por mês"
-)
-
-
 plt.xlabel(
     "Mês do Carimbo Centralizado"
 )
@@ -1329,9 +1626,14 @@ plt.ylabel(
 )
 
 
+plt.title(
+    "Distribuição percentual do lead time por mês"
+)
+
+
 plt.grid(
     axis="y",
-    alpha=0.3
+    alpha=.3
 )
 
 
@@ -1342,7 +1644,7 @@ plt.tight_layout()
 
 
 plt.savefig(
-    GRAFICO_EXTREMOS,
+    "05_extremos_por_mes.png",
     dpi=200,
     bbox_inches="tight"
 )
@@ -1352,25 +1654,13 @@ plt.show()
 
 
 # ============================================================
-# 26. EXIBIR PRINCIPAIS RESULTADOS
+# 28. PRINTS
 # ============================================================
 
 print()
-print("=" * 70)
-print("RESUMO")
-print("=" * 70)
-
-print(
-    resumo.to_string(
-        index=False
-    )
-)
-
-
-print()
-print("=" * 70)
-print("DISTRIBUIÇÃO DE 5 EM 5 DIAS")
-print("=" * 70)
+print("=" * 100)
+print("DISTRIBUIÇÃO")
+print("=" * 100)
 
 print(
     distribuicao.to_string(
@@ -1380,27 +1670,15 @@ print(
 
 
 print()
-print("=" * 70)
-print("EVOLUÇÃO MENSAL")
-print("=" * 70)
-
-print(
-    evolucao_mensal.to_string(
-        index=False
-    )
-)
+print("=" * 100)
+print("PRINCIPAIS SINAIS - 0 A 10 DIAS")
+print("=" * 100)
 
 
-print()
-print("=" * 70)
-print("PRINCIPAIS PADRÕES - 0 A 10 DIAS")
-print("=" * 70)
-
-
-if not top_rapidas.empty:
+if not sinais_rapidas.empty:
 
     print(
-        top_rapidas[
+        sinais_rapidas[
             [
                 "VARIAVEL",
                 "CATEGORIA",
@@ -1409,28 +1687,24 @@ if not top_rapidas.empty:
                 "PCT_BASE",
                 "DIFERENCA_PP",
                 "LIFT",
-                "PADRAO_90"
+                "SINAL_DESCRITIVO"
             ]
         ]
         .head(30)
         .to_string(index=False)
     )
 
-else:
-
-    print("Nenhum resultado.")
-
 
 print()
-print("=" * 70)
-print("PRINCIPAIS PADRÕES - >105 DIAS")
-print("=" * 70)
+print("=" * 100)
+print("PRINCIPAIS SINAIS - >105 DIAS")
+print("=" * 100)
 
 
-if not top_longas.empty:
+if not sinais_longas.empty:
 
     print(
-        top_longas[
+        sinais_longas[
             [
                 "VARIAVEL",
                 "CATEGORIA",
@@ -1439,20 +1713,75 @@ if not top_longas.empty:
                 "PCT_BASE",
                 "DIFERENCA_PP",
                 "LIFT",
-                "PADRAO_90"
+                "SINAL_DESCRITIVO"
+            ]
+        ]
+        .head(40)
+        .to_string(index=False)
+    )
+
+
+print()
+print("=" * 100)
+print("TOP COMBINAÇÕES - >105 DIAS")
+print("=" * 100)
+
+
+if not combinacoes_longas.empty:
+
+    print(
+        combinacoes_longas[
+            [
+                "VARIAVEL",
+                "CATEGORIA",
+                "OBRAS_GRUPO",
+                "PCT_GRUPO",
+                "PCT_BASE",
+                "DIFERENCA_PP",
+                "LIFT",
+                "SINAL_DESCRITIVO"
             ]
         ]
         .head(30)
         .to_string(index=False)
     )
-
-else:
-
-    print("Nenhum resultado.")
 
 
 # ============================================================
-# 27. EXPORTAR PARA EXCEL
+# 29. RESUMO
+# ============================================================
+
+resumo = pd.DataFrame({
+
+    "GRUPO": [
+        "TOTAL VÁLIDO",
+        "0-10 DIAS",
+        ">105 DIAS",
+        "NEGATIVOS",
+        "SEM AS DUAS DATAS"
+    ],
+
+    "OBRAS": [
+        total_obras,
+        df_rapidas[COL_ID].nunique(),
+        df_longas[COL_ID].nunique(),
+        df_negativos[COL_ID].nunique(),
+        df_sem_data[COL_ID].nunique()
+    ],
+
+    "SITES": [
+        total_sites,
+        df_rapidas[COL_SITE].nunique(),
+        df_longas[COL_SITE].nunique(),
+        df_negativos[COL_SITE].nunique(),
+        df_sem_data[COL_SITE].nunique()
+    ]
+
+})
+
+
+# ============================================================
+# 30. EXCEL
 # ============================================================
 
 print()
@@ -1500,18 +1829,13 @@ with pd.ExcelWriter(
     )
 
 
-    top_rapidas.to_excel(
-        writer,
-        sheet_name="Top_0_10",
-        index=False
-    )
+    if not distribuicao_categoria.empty:
 
-
-    top_longas.to_excel(
-        writer,
-        sheet_name="Top_maior_105",
-        index=False
-    )
+        distribuicao_categoria.to_excel(
+            writer,
+            sheet_name="Escopo_por_faixa",
+            index=False
+        )
 
 
     analise_rapidas.to_excel(
@@ -1528,16 +1852,23 @@ with pd.ExcelWriter(
     )
 
 
-    padroes_90_rapidas.to_excel(
+    sinais_rapidas.to_excel(
         writer,
-        sheet_name="Padrao90_0_10",
+        sheet_name="Sinais_0_10",
         index=False
     )
 
 
-    padroes_90_longas.to_excel(
+    sinais_longas.to_excel(
         writer,
-        sheet_name="Padrao90_105",
+        sheet_name="Sinais_maior_105",
+        index=False
+    )
+
+
+    combinacoes_longas.to_excel(
+        writer,
+        sheet_name="Combinacoes_105",
         index=False
     )
 
@@ -1570,84 +1901,31 @@ with pd.ExcelWriter(
     )
 
 
-# ============================================================
-# 28. FORMATAR EXCEL
-# ============================================================
-
-from openpyxl import load_workbook
-
-
-wb = load_workbook(
-    ARQUIVO_EXCEL
-)
-
-
-for ws in wb.worksheets:
-
-    ws.freeze_panes = "A2"
-
-    ws.auto_filter.ref = (
-        ws.dimensions
-    )
-
-
-    for coluna in ws.columns:
-
-        letra = coluna[0].column_letter
-
-        maior = 0
-
-
-        # Só analisa primeiras 300 linhas
-        # para não ficar muito lento
-        for celula in coluna[:300]:
-
-            if celula.value is not None:
-
-                tamanho = len(
-                    str(celula.value)
-                )
-
-                maior = max(
-                    maior,
-                    tamanho
-                )
-
-
-        ws.column_dimensions[
-            letra
-        ].width = min(
-            maior + 2,
-            45
-        )
-
-
-wb.save(
-    ARQUIVO_EXCEL
-)
-
-
-# ============================================================
-# 29. FINAL
-# ============================================================
-
 print()
-print("=" * 70)
-print("ESTUDO FINALIZADO")
-print("=" * 70)
+print("=" * 80)
+print("FINALIZADO")
+print("=" * 80)
 
 print(
     f"Excel: {ARQUIVO_EXCEL}"
 )
 
 print(
-    f"Gráfico 1: {GRAFICO_DISTRIBUICAO}"
+    "Gráfico 1: 01_faixas_por_escopo.png"
 )
 
 print(
-    f"Gráfico 2: {GRAFICO_EVOLUCAO}"
+    "Gráfico 2: 02_percentual_escopo_por_faixa.png"
 )
 
 print(
-    f"Gráfico 3: {GRAFICO_EXTREMOS}"
+    "Gráfico 3: 03_evolucao_mensal.png"
+)
+
+print(
+    "Gráfico 4: 04_desvios_maior_105.png"
+)
+
+print(
+    "Gráfico 5: 05_extremos_por_mes.png"
 )
