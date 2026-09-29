@@ -1,0 +1,263 @@
+# ============================================================
+# 15. GRÁFICO 1
+# QUANTIDADE + ESCOPO + PERCENTUAIS DOS GRANDES GRUPOS
+# ============================================================
+
+if "ESCOPO_META_AJUSTADO" in df_grafico.columns:
+
+    # ========================================================
+    # PERCENTUAIS SOBRE TODAS AS OBRAS VÁLIDAS
+    # ========================================================
+
+    total_validas = df_valido[COL_ID].nunique()
+
+
+    qtd_0_10 = df_valido.loc[
+        df_valido["LEAD_TIME_DIAS"].between(
+            0,
+            10,
+            inclusive="both"
+        ),
+        COL_ID
+    ].nunique()
+
+
+    qtd_11_105 = df_valido.loc[
+        (
+            df_valido["LEAD_TIME_DIAS"] > 10
+        )
+        &
+        (
+            df_valido["LEAD_TIME_DIAS"] <= 105
+        ),
+        COL_ID
+    ].nunique()
+
+
+    qtd_maior_105 = df_valido.loc[
+        df_valido["LEAD_TIME_DIAS"] > 105,
+        COL_ID
+    ].nunique()
+
+
+    pct_0_10 = (
+        qtd_0_10
+        / total_validas
+        * 100
+    )
+
+
+    pct_11_105 = (
+        qtd_11_105
+        / total_validas
+        * 100
+    )
+
+
+    pct_maior_105 = (
+        qtd_maior_105
+        / total_validas
+        * 100
+    )
+
+
+    # ========================================================
+    # CORES
+    #
+    # Física = azul
+    # Lógica = amarelo
+    # Outros = laranja
+    # Remanejamento = cinza
+    # ========================================================
+
+    cores_escopo = {
+        "FÍSICA": "#1f77b4",
+        "LÓGICA": "#F2C94C",
+        "OUTROS": "#F28E2B",
+        "REMANEJAMENTO": "#7f7f7f"
+    }
+
+
+    cores = [
+        cores_escopo[col]
+        for col in pivot_escopo.columns
+    ]
+
+
+    # ========================================================
+    # PLOT
+    # ========================================================
+
+    ax = pivot_escopo.plot(
+        kind="bar",
+        stacked=True,
+        figsize=(21, 9),
+        color=cores
+    )
+
+
+    plt.title(
+        "Distribuição do Lead Time entre LIB Site e Ativação por Escopo Meta\n"
+        "Carimbo Centralizado 2026",
+        fontsize=14,
+        pad=55
+    )
+
+
+    plt.xlabel(
+        "Lead Time - Ativação menos LIB Site (dias)"
+    )
+
+
+    plt.ylabel(
+        "Quantidade de obras"
+    )
+
+
+    plt.xticks(
+        rotation=45,
+        ha="right"
+    )
+
+
+    plt.legend(
+        title="Escopo Meta",
+        bbox_to_anchor=(1.01, 1),
+        loc="upper left"
+    )
+
+
+    plt.grid(
+        axis="y",
+        alpha=0.3
+    )
+
+
+    # ========================================================
+    # TOTAL EM CIMA DE CADA BARRA
+    # ========================================================
+
+    totais = (
+        pivot_escopo
+        .sum(axis=1)
+    )
+
+
+    for i, total in enumerate(totais):
+
+        if total > 0:
+
+            ax.text(
+                i,
+                total,
+                f"{int(total)}",
+                ha="center",
+                va="bottom",
+                fontsize=7
+            )
+
+
+    # ========================================================
+    # LINHAS DE SEPARAÇÃO
+    # ========================================================
+
+    labels_faixas = list(
+        pivot_escopo.index
+    )
+
+
+    # Separação depois de 10 dias
+    if "6-10" in labels_faixas:
+
+        pos_fim_10 = (
+            labels_faixas.index("6-10")
+            + 0.5
+        )
+
+        ax.axvline(
+            pos_fim_10,
+            linestyle="--",
+            linewidth=1.2,
+            alpha=0.7
+        )
+
+
+    # Separação depois de 105 dias
+    if "101-105" in labels_faixas:
+
+        pos_fim_105 = (
+            labels_faixas.index("101-105")
+            + 0.5
+        )
+
+        ax.axvline(
+            pos_fim_105,
+            linestyle="--",
+            linewidth=1.2,
+            alpha=0.7
+        )
+
+
+    # ========================================================
+    # CABEÇALHO COM QUANTIDADE + %
+    # ========================================================
+
+    ax.text(
+        0.04,
+        1.03,
+        (
+            f"0–10 dias\n"
+            f"{qtd_0_10:,} obras | "
+            f"{pct_0_10:.1f}% do total"
+        ),
+        transform=ax.transAxes,
+        ha="center",
+        va="bottom",
+        fontsize=10,
+        fontweight="bold"
+    )
+
+
+    ax.text(
+        0.37,
+        1.03,
+        (
+            f"11–105 dias\n"
+            f"{qtd_11_105:,} obras | "
+            f"{pct_11_105:.1f}% do total"
+        ),
+        transform=ax.transAxes,
+        ha="center",
+        va="bottom",
+        fontsize=10,
+        fontweight="bold"
+    )
+
+
+    ax.text(
+        0.78,
+        1.03,
+        (
+            f">105 dias\n"
+            f"{qtd_maior_105:,} obras | "
+            f"{pct_maior_105:.1f}% do total"
+        ),
+        transform=ax.transAxes,
+        ha="center",
+        va="bottom",
+        fontsize=10,
+        fontweight="bold"
+    )
+
+
+    plt.tight_layout()
+
+
+    plt.savefig(
+        "01_lead_time_por_escopo_com_percentuais.png",
+        dpi=200,
+        bbox_inches="tight"
+    )
+
+
+    plt.show()
