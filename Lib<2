@@ -1,38 +1,26 @@
 # ============================================================
-# 15. GRÁFICO 1
-# QUANTIDADE + ESCOPO + PERCENTUAIS DOS GRANDES GRUPOS
+# 15. GRÁFICO 1 - VERSÃO PARA POWERPOINT
 # ============================================================
 
 if "ESCOPO_META_AJUSTADO" in df_grafico.columns:
 
-    # ========================================================
-    # PERCENTUAIS SOBRE TODAS AS OBRAS VÁLIDAS
-    # ========================================================
+    # --------------------------------------------------------
+    # RESUMO DOS GRUPOS
+    # --------------------------------------------------------
 
     total_validas = df_valido[COL_ID].nunique()
 
-
     qtd_0_10 = df_valido.loc[
-        df_valido["LEAD_TIME_DIAS"].between(
-            0,
-            10,
-            inclusive="both"
-        ),
+        df_valido["LEAD_TIME_DIAS"].between(0, 10),
         COL_ID
     ].nunique()
-
 
     qtd_11_105 = df_valido.loc[
-        (
-            df_valido["LEAD_TIME_DIAS"] > 10
-        )
+        (df_valido["LEAD_TIME_DIAS"] > 10)
         &
-        (
-            df_valido["LEAD_TIME_DIAS"] <= 105
-        ),
+        (df_valido["LEAD_TIME_DIAS"] <= 105),
         COL_ID
     ].nunique()
-
 
     qtd_maior_105 = df_valido.loc[
         df_valido["LEAD_TIME_DIAS"] > 105,
@@ -40,35 +28,14 @@ if "ESCOPO_META_AJUSTADO" in df_grafico.columns:
     ].nunique()
 
 
-    pct_0_10 = (
-        qtd_0_10
-        / total_validas
-        * 100
-    )
+    pct_0_10 = qtd_0_10 / total_validas * 100
+    pct_11_105 = qtd_11_105 / total_validas * 100
+    pct_maior_105 = qtd_maior_105 / total_validas * 100
 
 
-    pct_11_105 = (
-        qtd_11_105
-        / total_validas
-        * 100
-    )
-
-
-    pct_maior_105 = (
-        qtd_maior_105
-        / total_validas
-        * 100
-    )
-
-
-    # ========================================================
+    # --------------------------------------------------------
     # CORES
-    #
-    # Física = azul
-    # Lógica = amarelo
-    # Outros = laranja
-    # Remanejamento = cinza
-    # ========================================================
+    # --------------------------------------------------------
 
     cores_escopo = {
         "FÍSICA": "#1f77b4",
@@ -77,7 +44,6 @@ if "ESCOPO_META_AJUSTADO" in df_grafico.columns:
         "REMANEJAMENTO": "#7f7f7f"
     }
 
-
     cores = [
         cores_escopo[col]
         for col in pivot_escopo.columns
@@ -85,177 +51,277 @@ if "ESCOPO_META_AJUSTADO" in df_grafico.columns:
 
 
     # ========================================================
-    # PLOT
+    # FIGURA 16:9
     # ========================================================
 
-    ax = pivot_escopo.plot(
-        kind="bar",
-        stacked=True,
-        figsize=(21, 9),
-        color=cores
+    fig, ax = plt.subplots(
+        figsize=(16, 9)
     )
 
 
-    plt.title(
-        "Distribuição do Lead Time entre LIB Site e Ativação por Escopo Meta\n"
-        "Carimbo Centralizado 2026",
-        fontsize=14,
+    pivot_escopo.plot(
+        kind="bar",
+        stacked=True,
+        ax=ax,
+        color=cores,
+        width=0.82
+    )
+
+
+    # --------------------------------------------------------
+    # TÍTULO
+    # --------------------------------------------------------
+
+    ax.set_title(
+        "Distribuição do Lead Time entre LIB Site e Ativação por Escopo Meta",
+        fontsize=20,
+        fontweight="bold",
         pad=55
     )
 
 
-    plt.xlabel(
-        "Lead Time - Ativação menos LIB Site (dias)"
+    ax.set_xlabel(
+        "Lead Time — Ativação menos LIB Site (dias)",
+        fontsize=15,
+        fontweight="bold"
     )
 
 
-    plt.ylabel(
-        "Quantidade de obras"
+    ax.set_ylabel(
+        "Quantidade de obras",
+        fontsize=15,
+        fontweight="bold"
     )
 
 
-    plt.xticks(
+    # ========================================================
+    # EIXO X
+    #
+    # Mantém barras de 5 em 5,
+    # mas mostra texto apenas de 10 em 10.
+    # ========================================================
+
+    labels = [
+        str(x)
+        for x in pivot_escopo.index
+    ]
+
+
+    posicoes = np.arange(
+        len(labels)
+    )
+
+
+    labels_exibidos = []
+
+
+    for i, label in enumerate(labels):
+
+        # mostra uma faixa sim e uma não
+        # 0-5, 11-15, 21-25...
+        if i % 2 == 0:
+            labels_exibidos.append(label)
+
+        else:
+            labels_exibidos.append("")
+
+
+    ax.set_xticks(posicoes)
+
+    ax.set_xticklabels(
+        labels_exibidos,
         rotation=45,
-        ha="right"
+        ha="right",
+        fontsize=11
     )
 
 
-    plt.legend(
-        title="Escopo Meta",
-        bbox_to_anchor=(1.01, 1),
-        loc="upper left"
-    )
-
-
-    plt.grid(
+    ax.tick_params(
         axis="y",
-        alpha=0.3
+        labelsize=12
     )
 
 
     # ========================================================
-    # TOTAL EM CIMA DE CADA BARRA
+    # LEGENDA
     # ========================================================
 
-    totais = (
-        pivot_escopo
-        .sum(axis=1)
+    ax.legend(
+        title="Escopo Meta",
+        title_fontsize=13,
+        fontsize=12,
+        loc="upper right",
+        frameon=True
     )
 
 
-    for i, total in enumerate(totais):
+    # ========================================================
+    # GRID
+    # ========================================================
 
-        if total > 0:
+    ax.grid(
+        axis="y",
+        alpha=0.25
+    )
+
+    ax.set_axisbelow(True)
+
+
+    # ========================================================
+    # SEPARAÇÕES 10 / 105
+    # ========================================================
+
+    if "6-10" in labels:
+
+        idx_10 = labels.index(
+            "6-10"
+        )
+
+        ax.axvline(
+            idx_10 + 0.5,
+            linestyle="--",
+            linewidth=1.5,
+            alpha=0.6
+        )
+
+    else:
+
+        idx_10 = 1
+
+
+    if "101-105" in labels:
+
+        idx_105 = labels.index(
+            "101-105"
+        )
+
+        ax.axvline(
+            idx_105 + 0.5,
+            linestyle="--",
+            linewidth=1.5,
+            alpha=0.6
+        )
+
+    else:
+
+        idx_105 = None
+
+
+    # ========================================================
+    # CABEÇALHOS DOS 3 GRUPOS
+    # ========================================================
+
+    # centro 0-10
+    centro_0_10 = idx_10 / 2
+
+
+    ax.text(
+        centro_0_10,
+        1.025,
+        (
+            f"0–10 dias\n"
+            f"{qtd_0_10:,} obras | {pct_0_10:.1f}%"
+        ),
+        transform=ax.get_xaxis_transform(),
+        ha="center",
+        va="bottom",
+        fontsize=12,
+        fontweight="bold"
+    )
+
+
+    if idx_105 is not None:
+
+        centro_11_105 = (
+            idx_10
+            + 1
+            + idx_105
+        ) / 2
+
+
+        ax.text(
+            centro_11_105,
+            1.025,
+            (
+                f"11–105 dias\n"
+                f"{qtd_11_105:,} obras | {pct_11_105:.1f}%"
+            ),
+            transform=ax.get_xaxis_transform(),
+            ha="center",
+            va="bottom",
+            fontsize=12,
+            fontweight="bold"
+        )
+
+
+        # centro de >105 até o final do gráfico
+        if idx_105 < len(labels) - 1:
+
+            centro_maior_105 = (
+                idx_105
+                + 1
+                + len(labels)
+                - 1
+            ) / 2
+
 
             ax.text(
-                i,
-                total,
-                f"{int(total)}",
+                centro_maior_105,
+                1.025,
+                (
+                    f">105 dias\n"
+                    f"{qtd_maior_105:,} obras | "
+                    f"{pct_maior_105:.1f}%"
+                ),
+                transform=ax.get_xaxis_transform(),
                 ha="center",
                 va="bottom",
-                fontsize=7
+                fontsize=12,
+                fontweight="bold"
             )
 
 
     # ========================================================
-    # LINHAS DE SEPARAÇÃO
+    # TOTAL DAS BARRAS
+    #
+    # Só mostramos nas barras mais relevantes,
+    # senão polui muito o slide.
     # ========================================================
 
-    labels_faixas = list(
-        pivot_escopo.index
-    )
+    totais = pivot_escopo.sum(axis=1)
 
 
-    # Separação depois de 10 dias
-    if "6-10" in labels_faixas:
+    for i, total in enumerate(totais):
 
-        pos_fim_10 = (
-            labels_faixas.index("6-10")
-            + 0.5
-        )
+        # mostrar um total a cada 2 barras
+        if total > 0 and i % 2 == 0:
 
-        ax.axvline(
-            pos_fim_10,
-            linestyle="--",
-            linewidth=1.2,
-            alpha=0.7
-        )
-
-
-    # Separação depois de 105 dias
-    if "101-105" in labels_faixas:
-
-        pos_fim_105 = (
-            labels_faixas.index("101-105")
-            + 0.5
-        )
-
-        ax.axvline(
-            pos_fim_105,
-            linestyle="--",
-            linewidth=1.2,
-            alpha=0.7
-        )
+            ax.text(
+                i,
+                total + 8,
+                f"{int(total)}",
+                ha="center",
+                va="bottom",
+                fontsize=9,
+                fontweight="bold"
+            )
 
 
     # ========================================================
-    # CABEÇALHO COM QUANTIDADE + %
+    # MARGENS
     # ========================================================
 
-    ax.text(
-        0.04,
-        1.03,
-        (
-            f"0–10 dias\n"
-            f"{qtd_0_10:,} obras | "
-            f"{pct_0_10:.1f}% do total"
-        ),
-        transform=ax.transAxes,
-        ha="center",
-        va="bottom",
-        fontsize=10,
-        fontweight="bold"
+    plt.subplots_adjust(
+        left=0.07,
+        right=0.98,
+        bottom=0.18,
+        top=0.84
     )
-
-
-    ax.text(
-        0.37,
-        1.03,
-        (
-            f"11–105 dias\n"
-            f"{qtd_11_105:,} obras | "
-            f"{pct_11_105:.1f}% do total"
-        ),
-        transform=ax.transAxes,
-        ha="center",
-        va="bottom",
-        fontsize=10,
-        fontweight="bold"
-    )
-
-
-    ax.text(
-        0.78,
-        1.03,
-        (
-            f">105 dias\n"
-            f"{qtd_maior_105:,} obras | "
-            f"{pct_maior_105:.1f}% do total"
-        ),
-        transform=ax.transAxes,
-        ha="center",
-        va="bottom",
-        fontsize=10,
-        fontweight="bold"
-    )
-
-
-    plt.tight_layout()
 
 
     plt.savefig(
-        "01_lead_time_por_escopo_com_percentuais.png",
-        dpi=200,
+        "01_lead_time_slide.png",
+        dpi=300,
         bbox_inches="tight"
     )
 
