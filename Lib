@@ -1,24 +1,21 @@
 # ============================================================
-# ESTUDO COMPLETO
-# ATIVAÇÃO -> LIB SITE
+# ESTUDO COMPLETO - LIB SITE -> ATIVAÇÃO
 #
 # COORTE:
-# PMO_CARIMBO_CENTRALIZADO em 2026
+# PMO_CARIMBO_CENTRALIZADO = 2026
 #
 # LEAD TIME:
-# REGIONAL_LIB_SITE_R - INTEGRADOR_ATIVACAO_R
+# INTEGRADOR_ATIVACAO_R - REGIONAL_LIB_SITE_R
 #
-# Inclui:
-# - faixas de 5 em 5 dias
-# - 0-10 dias
+# ANÁLISES:
+# - distribuição de 5 em 5 dias
+# - gráfico até no máximo 200 dias
+# - 0 a 10 dias
 # - >105 dias
-# - padrões por atributos PMTS
-# - diferença contra população
-# - lift
-# - combinações de características
-# - PMO_ESCOPO_META por faixa
+# - padrões e lift
+# - PMO_ESCOPO_META consolidado
 # - evolução mensal
-# - exportação Excel
+# - Excel
 # ============================================================
 
 
@@ -39,37 +36,34 @@ BANCO = "prod"
 DATABASE = "movel_rf"
 TABELA = "pmts_rf"
 
-
 COL_ID = "UID_IDPMTS"
 COL_SITE = "UID_UFSIGLA"
 
-COL_ATIVACAO = "INTEGRADOR_ATIVACAO_R"
 COL_LIB = "REGIONAL_LIB_SITE_R"
+COL_ATIVACAO = "INTEGRADOR_ATIVACAO_R"
 COL_CARIMBO = "PMO_CARIMBO_CENTRALIZADO"
 
-COL_CATEGORIA = "PMO_ESCOPO_META"
-
+COL_ESCOPO = "PMO_ESCOPO_META"
 
 DATA_INICIO = "2026-01-01"
 DATA_FIM = "2027-01-01"
 
 LIMITE_RAPIDO = 10
 LIMITE_LONGO = 105
+LIMITE_GRAFICO = 200
 
 MIN_OBRAS_PADRAO = 10
 
-
-ARQUIVO_EXCEL = "estudo_ativacao_lib_site_2026.xlsx"
+ARQUIVO_EXCEL = "estudo_lib_ativacao_2026.xlsx"
 
 
 # ============================================================
-# 1. LEITURA
+# 1. LEITURA DA PMTS
 # ============================================================
 
 print("=" * 80)
 print("LENDO PMTS")
 print("=" * 80)
-
 
 df = c.read_sql(
     DATABASE,
@@ -82,28 +76,25 @@ df = c.read_sql(
     """
 )
 
-
 df.columns = [
     str(col).strip().upper()
     for col in df.columns
 ]
 
-
 print(f"Linhas recebidas: {len(df):,}")
 
 
 # ============================================================
-# 2. VALIDAR COLUNAS
+# 2. VALIDAR COLUNAS OBRIGATÓRIAS
 # ============================================================
 
 obrigatorias = [
     COL_ID,
     COL_SITE,
-    COL_ATIVACAO,
     COL_LIB,
+    COL_ATIVACAO,
     COL_CARIMBO
 ]
-
 
 faltantes = [
     col
@@ -111,9 +102,7 @@ faltantes = [
     if col not in df.columns
 ]
 
-
 if faltantes:
-
     raise ValueError(
         "Colunas obrigatórias ausentes:\n"
         + "\n".join(faltantes)
@@ -121,12 +110,12 @@ if faltantes:
 
 
 # ============================================================
-# 3. DATAS
+# 3. CONVERTER DATAS
 # ============================================================
 
 for col in [
-    COL_ATIVACAO,
     COL_LIB,
+    COL_ATIVACAO,
     COL_CARIMBO,
     "DATA_MODIFICACAO"
 ]:
@@ -140,10 +129,10 @@ for col in [
 
 
 # ============================================================
-# 4. UMA LINHA POR OBRA
+# 4. GARANTIR UMA LINHA POR IDPMTS
 # ============================================================
 
-duplicados = (
+qtd_duplicados = (
     df.loc[
         df.duplicated(
             subset=[COL_ID],
@@ -154,10 +143,7 @@ duplicados = (
     .nunique()
 )
 
-
-print(
-    f"IDPMTS duplicados: {duplicados:,}"
-)
+print(f"IDPMTS duplicados: {qtd_duplicados:,}")
 
 
 if "DATA_MODIFICACAO" in df.columns:
@@ -185,234 +171,147 @@ else:
 
 
 print(
-    f"Obras únicas: {df[COL_ID].nunique():,}"
+    f"Obras únicas com carimbo 2026: "
+    f"{df[COL_ID].nunique():,}"
 )
 
 print(
-    f"Sites únicos: {df[COL_SITE].nunique():,}"
+    f"Sites únicos: "
+    f"{df[COL_SITE].nunique():,}"
 )
 
 
 # ============================================================
-# 5. SEPARAR QUEM NÃO TEM AS DUAS DATAS
+# 5. SEPARAR OBRAS SEM LIB OU ATIVAÇÃO
 # ============================================================
 
 df_sem_data = df[
-    df[COL_ATIVACAO].isna()
-    |
     df[COL_LIB].isna()
+    |
+    df[COL_ATIVACAO].isna()
 ].copy()
 
 
 df_analise = df[
-    df[COL_ATIVACAO].notna()
-    &
     df[COL_LIB].notna()
-].copy()
-
-
-# ============================================================
-# 6. LEAD TIME
-# ============================================================
-#
-# CORRETO:
-#
-# LIB - ATIVAÇÃO
-#
-# ============================================================
-
-df_analise["DIAS_ATIVACAO_ATE_LIB"] = (
-    df_analise[COL_LIB]
-    -
-    df_analise[COL_ATIVACAO]
-).dt.days
-
-
-# ============================================================
-# 7. NEGATIVOS
-# ============================================================
-
-df_negativos = df_analise[
-    df_analise["DIAS_ATIVACAO_ATE_LIB"] < 0
-].copy()
-
-
-df_valido = df_analise[
-    df_analise["DIAS_ATIVACAO_ATE_LIB"] >= 0
+    &
+    df[COL_ATIVACAO].notna()
 ].copy()
 
 
 print()
 print(
-    f"Com as duas datas: "
+    f"Obras com LIB + Ativação: "
     f"{df_analise[COL_ID].nunique():,}"
 )
 
 print(
-    f"Negativos: "
+    f"Obras sem alguma das datas: "
+    f"{df_sem_data[COL_ID].nunique():,}"
+)
+
+
+# ============================================================
+# 6. CALCULAR LEAD TIME
+# ============================================================
+#
+# CORRETO:
+#
+# ATIVAÇÃO - LIB
+#
+# Exemplo:
+#
+# LIB       = 01/03/2026
+# ATIVAÇÃO  = 21/03/2026
+#
+# LEAD TIME = 20 dias
+#
+# ============================================================
+
+df_analise["LEAD_TIME_DIAS"] = (
+    df_analise[COL_ATIVACAO]
+    -
+    df_analise[COL_LIB]
+).dt.days
+
+
+# ============================================================
+# 7. SEPARAR LEAD TIMES NEGATIVOS
+# ============================================================
+#
+# Negativo significa:
+#
+# ATIVAÇÃO aconteceu antes da LIB.
+#
+# Não usamos ABS, pois isso esconderia a inconsistência.
+# ============================================================
+
+df_negativos = df_analise[
+    df_analise["LEAD_TIME_DIAS"] < 0
+].copy()
+
+
+df_valido = df_analise[
+    df_analise["LEAD_TIME_DIAS"] >= 0
+].copy()
+
+
+print(
+    f"Lead times negativos: "
     f"{df_negativos[COL_ID].nunique():,}"
 )
 
 print(
-    f"Válidos: "
+    f"Obras válidas: "
     f"{df_valido[COL_ID].nunique():,}"
 )
 
 
 # ============================================================
-# 8. FAIXAS DE 5 EM 5
+# 8. CONSOLIDAR PMO_ESCOPO_META
 # ============================================================
 
-def criar_faixa(dias):
+def consolidar_escopo(valor):
 
-    if pd.isna(dias):
-        return np.nan
+    if pd.isna(valor):
+        return "OUTROS"
 
-    dias = int(dias)
+    texto = str(valor).strip().upper()
 
-    if dias > 105:
-        return ">105"
+    # retirar diferenças de acento
+    if texto in ["FÍSICA", "FISICA"]:
+        return "FÍSICA"
 
-    if dias <= 5:
-        return "0-5"
+    if texto in ["LÓGICA", "LOGICA"]:
+        return "LÓGICA"
 
-    inicio = ((dias - 1) // 5) * 5 + 1
-    fim = inicio + 4
+    if "REMANEJ" in texto:
+        return "REMANEJAMENTO"
 
-    return f"{inicio}-{fim}"
+    # OUTROS_AEV
+    # OUTROS_GAB-CONS
+    # OUTROS_GERAL
+    # etc.
+    if "OUTRO" in texto:
+        return "OUTROS"
+
+    # qualquer categoria residual
+    return "OUTROS"
 
 
-df_valido["FAIXA_DIAS"] = (
-    df_valido["DIAS_ATIVACAO_ATE_LIB"]
-    .apply(criar_faixa)
-)
+if COL_ESCOPO in df_valido.columns:
 
-
-ordem_faixas = ["0-5"]
-
-for inicio in range(6, 106, 5):
-
-    ordem_faixas.append(
-        f"{inicio}-{inicio + 4}"
+    df_valido["ESCOPO_META_AJUSTADO"] = (
+        df_valido[COL_ESCOPO]
+        .apply(consolidar_escopo)
     )
 
-ordem_faixas.append(">105")
-
-
-df_valido["FAIXA_DIAS"] = pd.Categorical(
-    df_valido["FAIXA_DIAS"],
-    categories=ordem_faixas,
-    ordered=True
-)
-
 
 # ============================================================
-# 9. DISTRIBUIÇÃO
+# 9. CRIAR FLAGS ANALÍTICAS
 # ============================================================
 
-distribuicao = (
-    df_valido
-    .groupby(
-        "FAIXA_DIAS",
-        observed=False
-    )
-    .agg(
-        OBRAS=(COL_ID, "nunique"),
-        SITES=(COL_SITE, "nunique")
-    )
-    .reset_index()
-)
-
-
-total_obras = df_valido[COL_ID].nunique()
-total_sites = df_valido[COL_SITE].nunique()
-
-
-distribuicao["PCT_OBRAS"] = (
-    distribuicao["OBRAS"]
-    /
-    total_obras
-    *
-    100
-).round(2)
-
-
-distribuicao["PCT_ACUMULADO"] = (
-    distribuicao["PCT_OBRAS"]
-    .cumsum()
-    .round(2)
-)
-
-
-# ============================================================
-# 10. ESTATÍSTICAS
-# ============================================================
-
-serie = df_valido[
-    "DIAS_ATIVACAO_ATE_LIB"
-]
-
-
-estatisticas = pd.DataFrame({
-
-    "METRICA": [
-        "Obras",
-        "Sites",
-        "Média",
-        "Mediana",
-        "P10",
-        "P25",
-        "P50",
-        "P75",
-        "P90",
-        "P95",
-        "Máximo"
-    ],
-
-    "VALOR": [
-        total_obras,
-        total_sites,
-        round(serie.mean(), 2),
-        round(serie.median(), 2),
-        round(serie.quantile(.10), 2),
-        round(serie.quantile(.25), 2),
-        round(serie.quantile(.50), 2),
-        round(serie.quantile(.75), 2),
-        round(serie.quantile(.90), 2),
-        round(serie.quantile(.95), 2),
-        serie.max()
-    ]
-
-})
-
-
-# ============================================================
-# 11. GRUPOS EXTREMOS
-# ============================================================
-
-df_rapidas = df_valido[
-    df_valido[
-        "DIAS_ATIVACAO_ATE_LIB"
-    ].between(
-        0,
-        10,
-        inclusive="both"
-    )
-].copy()
-
-
-df_longas = df_valido[
-    df_valido[
-        "DIAS_ATIVACAO_ATE_LIB"
-    ] > 105
-].copy()
-
-
-# ============================================================
-# 12. FLAGS ANALÍTICAS
-# ============================================================
-
-def flag_5g(valor):
+def classificar_5g(valor):
 
     if pd.isna(valor):
         return "SEM INFORMACAO"
@@ -425,7 +324,7 @@ def flag_5g(valor):
     return "NAO TEM 5G"
 
 
-def tipo_intervencao(valor):
+def classificar_intervencao(valor):
 
     if pd.isna(valor):
         return "SEM INFORMACAO"
@@ -441,36 +340,599 @@ def tipo_intervencao(valor):
     return texto
 
 
-for dataframe in [
-    df_valido,
-    df_rapidas,
-    df_longas
-]:
+if "PMO_TECN_EQUIP" in df_valido.columns:
 
-    if "PMO_TECN_EQUIP" in dataframe.columns:
-
-        dataframe["FLAG_5G"] = (
-            dataframe["PMO_TECN_EQUIP"]
-            .apply(flag_5g)
-        )
+    df_valido["FLAG_5G"] = (
+        df_valido["PMO_TECN_EQUIP"]
+        .apply(classificar_5g)
+    )
 
 
-    if "PMO_TIPO_INTERV" in dataframe.columns:
+if "PMO_TIPO_INTERV" in df_valido.columns:
 
-        dataframe[
-            "TIPO_INTERVENCAO_ANALISE"
-        ] = (
-            dataframe["PMO_TIPO_INTERV"]
-            .apply(tipo_intervencao)
-        )
+    df_valido["TIPO_INTERVENCAO_ANALISE"] = (
+        df_valido["PMO_TIPO_INTERV"]
+        .apply(classificar_intervencao)
+    )
 
 
 # ============================================================
-# 13. CAMPOS PARA PROCURAR PADRÕES
+# 10. GRUPOS EXTREMOS
+# ============================================================
+
+df_rapidas = df_valido[
+    df_valido["LEAD_TIME_DIAS"]
+    .between(
+        0,
+        LIMITE_RAPIDO,
+        inclusive="both"
+    )
+].copy()
+
+
+df_longas = df_valido[
+    df_valido["LEAD_TIME_DIAS"]
+    > LIMITE_LONGO
+].copy()
+
+
+# ============================================================
+# 11. FAIXAS DO GRÁFICO
+#
+# IMPORTANTE:
+# O gráfico vai somente até 200 dias.
+#
+# A análise >105 continua considerando TUDO,
+# inclusive 201, 300, 500 dias etc.
+# ============================================================
+
+df_grafico = df_valido[
+    df_valido["LEAD_TIME_DIAS"]
+    <= LIMITE_GRAFICO
+].copy()
+
+
+if len(df_grafico) == 0:
+
+    raise ValueError(
+        "Não existem registros válidos entre 0 e 200 dias."
+    )
+
+
+max_dias_grafico = int(
+    df_grafico["LEAD_TIME_DIAS"].max()
+)
+
+
+# arredondar para cima para múltiplo de 5
+ultimo_limite = int(
+    np.ceil(max_dias_grafico / 5) * 5
+)
+
+
+# mínimo 5
+ultimo_limite = max(
+    ultimo_limite,
+    5
+)
+
+
+def criar_faixa_grafico(dias):
+
+    if pd.isna(dias):
+        return np.nan
+
+    dias = int(dias)
+
+    if dias <= 5:
+        return "0-5"
+
+    inicio = (
+        ((dias - 1) // 5)
+        * 5
+        + 1
+    )
+
+    fim = inicio + 4
+
+    return f"{inicio}-{fim}"
+
+
+df_grafico["FAIXA_DIAS"] = (
+    df_grafico["LEAD_TIME_DIAS"]
+    .apply(criar_faixa_grafico)
+)
+
+
+ordem_faixas = ["0-5"]
+
+for inicio in range(
+    6,
+    ultimo_limite + 1,
+    5
+):
+
+    ordem_faixas.append(
+        f"{inicio}-{inicio + 4}"
+    )
+
+
+df_grafico["FAIXA_DIAS"] = pd.Categorical(
+    df_grafico["FAIXA_DIAS"],
+    categories=ordem_faixas,
+    ordered=True
+)
+
+
+# ============================================================
+# 12. DISTRIBUIÇÃO POR FAIXA
+# ============================================================
+
+distribuicao = (
+    df_grafico
+    .groupby(
+        "FAIXA_DIAS",
+        observed=False
+    )
+    .agg(
+        OBRAS=(COL_ID, "nunique"),
+        SITES=(COL_SITE, "nunique")
+    )
+    .reset_index()
+)
+
+
+# eliminar somente faixas vazias no final
+while (
+    len(distribuicao) > 0
+    and
+    distribuicao.iloc[-1]["OBRAS"] == 0
+):
+
+    distribuicao = (
+        distribuicao
+        .iloc[:-1]
+        .copy()
+    )
+
+
+total_grafico = (
+    distribuicao["OBRAS"]
+    .sum()
+)
+
+
+distribuicao["PCT_OBRAS"] = (
+    distribuicao["OBRAS"]
+    /
+    total_grafico
+    *
+    100
+).round(2)
+
+
+# ============================================================
+# 13. ESTATÍSTICAS GERAIS
+# ============================================================
+
+serie = df_valido["LEAD_TIME_DIAS"]
+
+
+estatisticas = pd.DataFrame({
+
+    "METRICA": [
+        "Obras analisadas",
+        "Sites únicos",
+        "Média",
+        "Mediana",
+        "P10",
+        "P25",
+        "P50",
+        "P75",
+        "P90",
+        "P95",
+        "Máximo"
+    ],
+
+    "VALOR": [
+        df_valido[COL_ID].nunique(),
+        df_valido[COL_SITE].nunique(),
+        round(serie.mean(), 2),
+        round(serie.median(), 2),
+        round(serie.quantile(.10), 2),
+        round(serie.quantile(.25), 2),
+        round(serie.quantile(.50), 2),
+        round(serie.quantile(.75), 2),
+        round(serie.quantile(.90), 2),
+        round(serie.quantile(.95), 2),
+        serie.max()
+    ]
+
+})
+
+
+# ============================================================
+# 14. DISTRIBUIÇÃO POR ESCOPO META
+# ============================================================
+
+if "ESCOPO_META_AJUSTADO" in df_grafico.columns:
+
+    distribuicao_escopo = (
+        df_grafico
+        .groupby(
+            [
+                "FAIXA_DIAS",
+                "ESCOPO_META_AJUSTADO"
+            ],
+            observed=False
+        )
+        .agg(
+            OBRAS=(COL_ID, "nunique")
+        )
+        .reset_index()
+    )
+
+
+    pivot_escopo = (
+        distribuicao_escopo
+        .pivot(
+            index="FAIXA_DIAS",
+            columns="ESCOPO_META_AJUSTADO",
+            values="OBRAS"
+        )
+        .fillna(0)
+    )
+
+
+    ordem_escopo = [
+        "FÍSICA",
+        "LÓGICA",
+        "OUTROS",
+        "REMANEJAMENTO"
+    ]
+
+
+    for col in ordem_escopo:
+
+        if col not in pivot_escopo.columns:
+            pivot_escopo[col] = 0
+
+
+    pivot_escopo = (
+        pivot_escopo[
+            ordem_escopo
+        ]
+    )
+
+
+    # mesma ordem das faixas
+    faixas_existentes = (
+        distribuicao[
+            "FAIXA_DIAS"
+        ]
+        .astype(str)
+        .tolist()
+    )
+
+
+    pivot_escopo.index = (
+        pivot_escopo.index.astype(str)
+    )
+
+
+    pivot_escopo = (
+        pivot_escopo
+        .reindex(
+            faixas_existentes
+        )
+        .fillna(0)
+    )
+
+
+    pivot_escopo_pct = (
+        pivot_escopo
+        .div(
+            pivot_escopo.sum(axis=1),
+            axis=0
+        )
+        .fillna(0)
+        * 100
+    )
+
+
+# ============================================================
+# 15. GRÁFICO 1
+# QUANTIDADE + ESCOPO
+# ============================================================
+
+if "ESCOPO_META_AJUSTADO" in df_grafico.columns:
+
+    # Lógica explicitamente roxa
+    cores = [
+        "#1f77b4",   # Física
+        "#7B2CBF",   # Lógica - roxo
+        "#ff7f0e",   # Outros
+        "#7f7f7f"    # Remanejamento
+    ]
+
+
+    ax = pivot_escopo.plot(
+        kind="bar",
+        stacked=True,
+        figsize=(20, 8),
+        color=cores
+    )
+
+
+    plt.title(
+        "Distribuição do Lead Time entre LIB Site e Ativação por Escopo Meta\n"
+        "Carimbo Centralizado 2026"
+    )
+
+
+    plt.xlabel(
+        "Lead Time - Ativação menos LIB Site (dias)"
+    )
+
+
+    plt.ylabel(
+        "Quantidade de obras"
+    )
+
+
+    plt.xticks(
+        rotation=45,
+        ha="right"
+    )
+
+
+    plt.legend(
+        title="Escopo Meta",
+        bbox_to_anchor=(1.01, 1),
+        loc="upper left"
+    )
+
+
+    plt.grid(
+        axis="y",
+        alpha=.3
+    )
+
+
+    totais = (
+        pivot_escopo
+        .sum(axis=1)
+    )
+
+
+    for i, total in enumerate(totais):
+
+        if total > 0:
+
+            ax.text(
+                i,
+                total,
+                f"{int(total)}",
+                ha="center",
+                va="bottom",
+                fontsize=7
+            )
+
+
+    plt.tight_layout()
+
+
+    plt.savefig(
+        "01_lead_time_por_escopo.png",
+        dpi=200,
+        bbox_inches="tight"
+    )
+
+
+    plt.show()
+
+
+# ============================================================
+# 16. GRÁFICO 2
+# COMPOSIÇÃO % POR ESCOPO
+# ============================================================
+
+if "ESCOPO_META_AJUSTADO" in df_grafico.columns:
+
+    ax = pivot_escopo_pct.plot(
+        kind="bar",
+        stacked=True,
+        figsize=(20, 8),
+        color=cores
+    )
+
+
+    plt.title(
+        "Composição do Escopo Meta por Faixa de Lead Time\n"
+        "Carimbo Centralizado 2026"
+    )
+
+
+    plt.xlabel(
+        "Lead Time - Ativação menos LIB Site (dias)"
+    )
+
+
+    plt.ylabel(
+        "% das obras"
+    )
+
+
+    plt.ylim(
+        0,
+        100
+    )
+
+
+    plt.xticks(
+        rotation=45,
+        ha="right"
+    )
+
+
+    plt.legend(
+        title="Escopo Meta",
+        bbox_to_anchor=(1.01, 1),
+        loc="upper left"
+    )
+
+
+    plt.grid(
+        axis="y",
+        alpha=.3
+    )
+
+
+    plt.tight_layout()
+
+
+    plt.savefig(
+        "02_percentual_escopo_por_lead_time.png",
+        dpi=200,
+        bbox_inches="tight"
+    )
+
+
+    plt.show()
+
+
+# ============================================================
+# 17. EVOLUÇÃO MENSAL
+# ============================================================
+
+df_valido["MES_CARIMBO"] = (
+    df_valido[COL_CARIMBO]
+    .dt.to_period("M")
+    .astype(str)
+)
+
+
+evolucao_mensal = (
+    df_valido
+    .groupby("MES_CARIMBO")
+    .agg(
+
+        OBRAS=(
+            COL_ID,
+            "nunique"
+        ),
+
+        MEDIA_DIAS=(
+            "LEAD_TIME_DIAS",
+            "mean"
+        ),
+
+        MEDIANA_DIAS=(
+            "LEAD_TIME_DIAS",
+            "median"
+        ),
+
+        P90_DIAS=(
+            "LEAD_TIME_DIAS",
+            lambda x: x.quantile(.90)
+        ),
+
+        P95_DIAS=(
+            "LEAD_TIME_DIAS",
+            lambda x: x.quantile(.95)
+        )
+
+    )
+    .reset_index()
+)
+
+
+for col in [
+    "MEDIA_DIAS",
+    "MEDIANA_DIAS",
+    "P90_DIAS",
+    "P95_DIAS"
+]:
+
+    evolucao_mensal[col] = (
+        evolucao_mensal[col]
+        .round(2)
+    )
+
+
+# ============================================================
+# 18. GRÁFICO 3 - MEDIANA E P90 POR MÊS
+# ============================================================
+
+plt.figure(
+    figsize=(14, 7)
+)
+
+
+plt.plot(
+    evolucao_mensal["MES_CARIMBO"],
+    evolucao_mensal["MEDIANA_DIAS"],
+    marker="o",
+    label="Mediana"
+)
+
+
+plt.plot(
+    evolucao_mensal["MES_CARIMBO"],
+    evolucao_mensal["P90_DIAS"],
+    marker="o",
+    label="P90"
+)
+
+
+plt.title(
+    "Evolução Mensal do Lead Time entre LIB Site e Ativação"
+)
+
+
+plt.xlabel(
+    "Mês do Carimbo Centralizado"
+)
+
+
+plt.ylabel(
+    "Lead Time (dias)"
+)
+
+
+plt.xticks(
+    rotation=45
+)
+
+
+plt.grid(
+    alpha=.3
+)
+
+
+plt.legend()
+
+
+plt.tight_layout()
+
+
+plt.savefig(
+    "03_evolucao_mensal_lead_time.png",
+    dpi=200,
+    bbox_inches="tight"
+)
+
+
+plt.show()
+
+
+# ============================================================
+# 19. VARIÁVEIS PARA BUSCAR PADRÕES
 # ============================================================
 
 candidatas = [
 
+    "ESCOPO_META_AJUSTADO",
     "PMO_ESCOPO_META",
 
     "PMO_PROJETO",
@@ -507,65 +969,54 @@ variaveis = [
 
 
 # ============================================================
-# 14. CLASSIFICAÇÃO DESCRITIVA DO SINAL
-# ============================================================
-#
-# IMPORTANTE:
-#
-# Isso NÃO significa causalidade.
-#
-# Serve para destacar:
-# - concentração absoluta
-# - sobre-representação
-# - sub-representação
-#
+# 20. CLASSIFICAÇÃO DO SINAL
 # ============================================================
 
 def classificar_sinal(row):
 
     pct = row["PCT_GRUPO"]
-    dif = row["DIFERENCA_PP"]
+    diferenca = row["DIFERENCA_PP"]
     lift = row["LIFT"]
-    n = row["OBRAS_GRUPO"]
+    qtd = row["OBRAS_GRUPO"]
 
 
-    if n < MIN_OBRAS_PADRAO:
+    if qtd < MIN_OBRAS_PADRAO:
         return "AMOSTRA PEQUENA"
 
 
-    # 90% ou mais do grupo
     if pct >= 90:
         return "CONCENTRACAO >=90%"
 
 
-    # Muito acima da incidência normal
     if (
-        dif >= 15
+        diferenca >= 15
         or
         (
             lift >= 2
             and pct >= 10
         )
     ):
+
         return "SOBRE-REPRESENTADO FORTE"
 
 
     if (
-        dif >= 7
+        diferenca >= 7
         or
         (
             lift >= 1.5
             and pct >= 5
         )
     ):
+
         return "SOBRE-REPRESENTADO"
 
 
-    if dif <= -10:
+    if diferenca <= -10:
         return "SUB-REPRESENTADO FORTE"
 
 
-    if dif <= -7:
+    if diferenca <= -7:
         return "SUB-REPRESENTADO"
 
 
@@ -573,7 +1024,7 @@ def classificar_sinal(row):
 
 
 # ============================================================
-# 15. FUNÇÃO DE ANÁLISE
+# 21. FUNÇÃO DE ANÁLISE DOS PADRÕES
 # ============================================================
 
 def analisar_padrao(
@@ -607,8 +1058,16 @@ def analisar_padrao(
     )
 
 
-    n_grupo = grupo[COL_ID].nunique()
-    n_total = total[COL_ID].nunique()
+    n_grupo = (
+        grupo[COL_ID]
+        .nunique()
+    )
+
+
+    n_total = (
+        total[COL_ID]
+        .nunique()
+    )
 
 
     if n_grupo == 0:
@@ -625,7 +1084,7 @@ def analisar_padrao(
     )
 
 
-    cont_total = (
+    cont_base = (
         total
         .groupby(coluna)[COL_ID]
         .nunique()
@@ -635,10 +1094,13 @@ def analisar_padrao(
     )
 
 
-    resultado = cont_grupo.merge(
-        cont_total,
-        on=coluna,
-        how="left"
+    resultado = (
+        cont_grupo
+        .merge(
+            cont_base,
+            on=coluna,
+            how="left"
+        )
     )
 
 
@@ -704,7 +1166,8 @@ def analisar_padrao(
 
 
     resultado["SINAL_DESCRITIVO"] = (
-        resultado.apply(
+        resultado
+        .apply(
             classificar_sinal,
             axis=1
         )
@@ -755,7 +1218,7 @@ def analisar_padrao(
 
 
 # ============================================================
-# 16. EXECUTAR ANÁLISE
+# 22. ANALISAR 0-10 E >105
 # ============================================================
 
 resultados_rapidas = []
@@ -764,7 +1227,7 @@ resultados_longas = []
 
 for coluna in variaveis:
 
-    r_rapida = analisar_padrao(
+    resultado_rapida = analisar_padrao(
         df_rapidas,
         df_valido,
         coluna,
@@ -772,7 +1235,7 @@ for coluna in variaveis:
     )
 
 
-    r_longa = analisar_padrao(
+    resultado_longa = analisar_padrao(
         df_longas,
         df_valido,
         coluna,
@@ -780,15 +1243,15 @@ for coluna in variaveis:
     )
 
 
-    if not r_rapida.empty:
+    if not resultado_rapida.empty:
         resultados_rapidas.append(
-            r_rapida
+            resultado_rapida
         )
 
 
-    if not r_longa.empty:
+    if not resultado_longa.empty:
         resultados_longas.append(
-            r_longa
+            resultado_longa
         )
 
 
@@ -813,17 +1276,17 @@ analise_longas = (
 
 
 # ============================================================
-# 17. ORDENAR GLOBALMENTE POR DESVIO
+# 23. ORDENAR SINAIS POR DIFERENÇA
 # ============================================================
 
-def ordenar_desvios(df_resultado):
+def ordenar_resultados(resultado):
 
-    if df_resultado.empty:
-        return df_resultado
+    if resultado.empty:
+        return resultado
 
 
-    temp = df_resultado[
-        df_resultado["OBRAS_GRUPO"]
+    temp = resultado[
+        resultado["OBRAS_GRUPO"]
         >= MIN_OBRAS_PADRAO
     ].copy()
 
@@ -850,606 +1313,51 @@ def ordenar_desvios(df_resultado):
     return temp
 
 
-top_rapidas = ordenar_desvios(
+top_rapidas = ordenar_resultados(
     analise_rapidas
 )
 
 
-top_longas = ordenar_desvios(
+top_longas = ordenar_resultados(
     analise_longas
 )
 
 
 # ============================================================
-# 18. SÓ SINAIS RELEVANTES
+# 24. SÓ OS SINAIS MAIS RELEVANTES
 # ============================================================
 
-sinais_rapidas = (
-    top_rapidas[
+if not top_rapidas.empty:
+
+    sinais_rapidas = top_rapidas[
         top_rapidas["SINAL_DESCRITIVO"]
         != "SEM DESVIO FORTE"
-    ]
-    .copy()
-)
+    ].copy()
+
+else:
+
+    sinais_rapidas = pd.DataFrame()
 
 
-sinais_longas = (
-    top_longas[
+if not top_longas.empty:
+
+    sinais_longas = top_longas[
         top_longas["SINAL_DESCRITIVO"]
         != "SEM DESVIO FORTE"
-    ]
-    .copy()
-)
-
-
-# ============================================================
-# 19. ANÁLISE DE COMBINAÇÕES
-# ============================================================
-#
-# Pode existir padrão conjunto mesmo sem nenhuma
-# variável individual chegar perto de 90%.
-#
-# Ex:
-# OUTROS + 4G
-# OUTROS + FÍSICA
-# 6.OUTROS + 4G
-#
-# ============================================================
-
-def analisar_combinacao(
-    df_grupo,
-    df_total,
-    colunas,
-    nome_grupo
-):
-
-    if not all(
-        col in df_total.columns
-        for col in colunas
-    ):
-        return pd.DataFrame()
-
-
-    grupo = df_grupo.copy()
-    total = df_total.copy()
-
-
-    for col in colunas:
-
-        grupo[col] = (
-            grupo[col]
-            .fillna("SEM INFORMACAO")
-            .astype(str)
-            .str.strip()
-        )
-
-
-        total[col] = (
-            total[col]
-            .fillna("SEM INFORMACAO")
-            .astype(str)
-            .str.strip()
-        )
-
-
-    grupo["COMBINACAO"] = (
-        grupo[colunas]
-        .agg(" | ".join, axis=1)
-    )
-
-
-    total["COMBINACAO"] = (
-        total[colunas]
-        .agg(" | ".join, axis=1)
-    )
-
-
-    resultado = analisar_padrao(
-        grupo,
-        total,
-        "COMBINACAO",
-        nome_grupo
-    )
-
-
-    if not resultado.empty:
-
-        resultado["VARIAVEL"] = (
-            " + ".join(colunas)
-        )
-
-
-    return resultado
-
-
-combinacoes = [
-
-    [
-        "PMO_PROJETO",
-        "PMO_TECN_EQUIP"
-    ],
-
-    [
-        "PMO_PROJETO",
-        "PMO_TIPO_INTERV"
-    ],
-
-    [
-        "PMO_PROJETO",
-        "PMO_ESCOPO_META"
-    ],
-
-    [
-        "PMO_TIPO_INTERV",
-        "PMO_TECN_EQUIP"
-    ],
-
-    [
-        "PMO_ESCOPO_META",
-        "PMO_TECN_EQUIP"
-    ],
-
-    [
-        "PMO_REGIONAL",
-        "PMO_TECN_EQUIP"
-    ]
-]
-
-
-resultado_combinacoes_longas = []
-
-
-for cols in combinacoes:
-
-    r = analisar_combinacao(
-        df_longas,
-        df_valido,
-        cols,
-        ">105 DIAS"
-    )
-
-    if not r.empty:
-        resultado_combinacoes_longas.append(r)
-
-
-if resultado_combinacoes_longas:
-
-    combinacoes_longas = pd.concat(
-        resultado_combinacoes_longas,
-        ignore_index=True
-    )
-
-
-    combinacoes_longas = ordenar_desvios(
-        combinacoes_longas
-    )
+    ].copy()
 
 else:
 
-    combinacoes_longas = pd.DataFrame()
+    sinais_longas = pd.DataFrame()
 
 
 # ============================================================
-# 20. EVOLUÇÃO MENSAL
-# ============================================================
-
-df_valido["MES_CARIMBO"] = (
-    df_valido[COL_CARIMBO]
-    .dt.to_period("M")
-    .astype(str)
-)
-
-
-evolucao_mensal = (
-    df_valido
-    .groupby("MES_CARIMBO")
-    .agg(
-
-        OBRAS=(
-            COL_ID,
-            "nunique"
-        ),
-
-        SITES=(
-            COL_SITE,
-            "nunique"
-        ),
-
-        MEDIA_DIAS=(
-            "DIAS_ATIVACAO_ATE_LIB",
-            "mean"
-        ),
-
-        MEDIANA_DIAS=(
-            "DIAS_ATIVACAO_ATE_LIB",
-            "median"
-        ),
-
-        P90_DIAS=(
-            "DIAS_ATIVACAO_ATE_LIB",
-            lambda x: x.quantile(.90)
-        ),
-
-        P95_DIAS=(
-            "DIAS_ATIVACAO_ATE_LIB",
-            lambda x: x.quantile(.95)
-        )
-
-    )
-    .reset_index()
-)
-
-
-for col in [
-    "MEDIA_DIAS",
-    "MEDIANA_DIAS",
-    "P90_DIAS",
-    "P95_DIAS"
-]:
-
-    evolucao_mensal[col] = (
-        evolucao_mensal[col]
-        .round(2)
-    )
-
-
-# ============================================================
-# 21. GRUPOS DE TEMPO MENSAIS
-# ============================================================
-
-def grupo_tempo(dias):
-
-    if dias <= 10:
-        return "0-10"
-
-    if dias <= 105:
-        return "11-105"
-
-    return ">105"
-
-
-df_valido["GRUPO_TEMPO"] = (
-    df_valido[
-        "DIAS_ATIVACAO_ATE_LIB"
-    ]
-    .apply(grupo_tempo)
-)
-
-
-extremos_mensal = (
-    df_valido
-    .groupby(
-        [
-            "MES_CARIMBO",
-            "GRUPO_TEMPO"
-        ]
-    )[COL_ID]
-    .nunique()
-    .reset_index(
-        name="OBRAS"
-    )
-)
-
-
-total_mes = (
-    df_valido
-    .groupby("MES_CARIMBO")[COL_ID]
-    .nunique()
-    .reset_index(
-        name="TOTAL_MES"
-    )
-)
-
-
-extremos_mensal = extremos_mensal.merge(
-    total_mes,
-    on="MES_CARIMBO",
-    how="left"
-)
-
-
-extremos_mensal["PERCENTUAL"] = (
-    extremos_mensal["OBRAS"]
-    /
-    extremos_mensal["TOTAL_MES"]
-    *
-    100
-).round(2)
-
-
-# ============================================================
-# 22. PMO_ESCOPO_META POR FAIXA
-# ============================================================
-
-if COL_CATEGORIA in df_valido.columns:
-
-    df_valido[COL_CATEGORIA] = (
-        df_valido[COL_CATEGORIA]
-        .fillna("SEM INFORMACAO")
-        .astype(str)
-        .str.strip()
-        .str.upper()
-    )
-
-
-    distribuicao_categoria = (
-        df_valido
-        .groupby(
-            [
-                "FAIXA_DIAS",
-                COL_CATEGORIA
-            ],
-            observed=False
-        )
-        .agg(
-            OBRAS=(COL_ID, "nunique")
-        )
-        .reset_index()
-    )
-
-
-    pivot_categoria = (
-        distribuicao_categoria
-        .pivot(
-            index="FAIXA_DIAS",
-            columns=COL_CATEGORIA,
-            values="OBRAS"
-        )
-        .fillna(0)
-        .reindex(ordem_faixas)
-        .fillna(0)
-    )
-
-
-    pivot_categoria_pct = (
-        pivot_categoria
-        .div(
-            pivot_categoria.sum(axis=1),
-            axis=0
-        )
-        *
-        100
-    )
-
-else:
-
-    distribuicao_categoria = pd.DataFrame()
-    pivot_categoria = pd.DataFrame()
-    pivot_categoria_pct = pd.DataFrame()
-
-
-# ============================================================
-# 23. GRÁFICO 1
-# QUANTIDADE POR FAIXA + PMO_ESCOPO_META
-# ============================================================
-
-if not pivot_categoria.empty:
-
-    ax = pivot_categoria.plot(
-        kind="bar",
-        stacked=True,
-        figsize=(17, 8)
-    )
-
-
-    plt.title(
-        "Distribuição do tempo entre Ativação e LIB Site por Escopo Meta\n"
-        "Carimbo Centralizado 2026"
-    )
-
-
-    plt.xlabel(
-        "Dias entre Ativação e LIB Site"
-    )
-
-
-    plt.ylabel(
-        "Quantidade de obras"
-    )
-
-
-    plt.xticks(
-        rotation=45,
-        ha="right"
-    )
-
-
-    plt.legend(
-        title="PMO_ESCOPO_META",
-        bbox_to_anchor=(1.02, 1),
-        loc="upper left"
-    )
-
-
-    plt.grid(
-        axis="y",
-        alpha=.3
-    )
-
-
-    totais = (
-        pivot_categoria
-        .sum(axis=1)
-    )
-
-
-    for i, total in enumerate(totais):
-
-        if total > 0:
-
-            ax.text(
-                i,
-                total,
-                f"{int(total)}",
-                ha="center",
-                va="bottom",
-                fontsize=8
-            )
-
-
-    plt.tight_layout()
-
-
-    plt.savefig(
-        "01_faixas_por_escopo.png",
-        dpi=200,
-        bbox_inches="tight"
-    )
-
-
-    plt.show()
-
-
-# ============================================================
-# 24. GRÁFICO 2
-# COMPOSIÇÃO % PMO_ESCOPO_META
-# ============================================================
-
-if not pivot_categoria_pct.empty:
-
-    ax = pivot_categoria_pct.plot(
-        kind="bar",
-        stacked=True,
-        figsize=(17, 8)
-    )
-
-
-    plt.title(
-        "Composição do Escopo Meta por tempo entre Ativação e LIB Site\n"
-        "Carimbo Centralizado 2026"
-    )
-
-
-    plt.xlabel(
-        "Dias entre Ativação e LIB Site"
-    )
-
-
-    plt.ylabel(
-        "% das obras"
-    )
-
-
-    plt.ylim(
-        0,
-        100
-    )
-
-
-    plt.xticks(
-        rotation=45,
-        ha="right"
-    )
-
-
-    plt.legend(
-        title="PMO_ESCOPO_META",
-        bbox_to_anchor=(1.02, 1),
-        loc="upper left"
-    )
-
-
-    plt.grid(
-        axis="y",
-        alpha=.3
-    )
-
-
-    plt.tight_layout()
-
-
-    plt.savefig(
-        "02_percentual_escopo_por_faixa.png",
-        dpi=200,
-        bbox_inches="tight"
-    )
-
-
-    plt.show()
-
-
-# ============================================================
-# 25. GRÁFICO 3
-# EVOLUÇÃO DA MEDIANA E P90
-# ============================================================
-
-plt.figure(
-    figsize=(14, 7)
-)
-
-
-plt.plot(
-    evolucao_mensal["MES_CARIMBO"],
-    evolucao_mensal["MEDIANA_DIAS"],
-    marker="o",
-    label="Mediana"
-)
-
-
-plt.plot(
-    evolucao_mensal["MES_CARIMBO"],
-    evolucao_mensal["P90_DIAS"],
-    marker="o",
-    label="P90"
-)
-
-
-plt.title(
-    "Evolução mensal do tempo entre Ativação e LIB Site"
-)
-
-
-plt.xlabel(
-    "Mês do Carimbo Centralizado"
-)
-
-
-plt.ylabel(
-    "Dias"
-)
-
-
-plt.xticks(
-    rotation=45
-)
-
-
-plt.grid(
-    alpha=.3
-)
-
-
-plt.legend()
-
-
-plt.tight_layout()
-
-
-plt.savefig(
-    "03_evolucao_mensal.png",
-    dpi=200,
-    bbox_inches="tight"
-)
-
-
-plt.show()
-
-
-# ============================================================
-# 26. GRÁFICO 4
-# TOP DESVIOS DO GRUPO >105
-# ============================================================
-#
-# Aqui está o gráfico que ajuda quando nenhum campo chega
-# a 90%.
-#
-# Positivo = mais comum nos >105 do que na base.
-# Negativo = menos comum nos >105 do que na base.
+# 25. GRÁFICO 4 - PRINCIPAIS DESVIOS >105
 # ============================================================
 
 if not top_longas.empty:
 
-    grafico_desvios = (
+    grafico_longas = (
         top_longas[
             top_longas["OBRAS_GRUPO"]
             >= MIN_OBRAS_PADRAO
@@ -1458,16 +1366,16 @@ if not top_longas.empty:
     )
 
 
-    grafico_desvios["ABS_DIF"] = (
-        grafico_desvios[
+    grafico_longas["ABS_DIF"] = (
+        grafico_longas[
             "DIFERENCA_PP"
         ]
         .abs()
     )
 
 
-    grafico_desvios = (
-        grafico_desvios
+    grafico_longas = (
+        grafico_longas
         .nlargest(
             15,
             "ABS_DIF"
@@ -1478,23 +1386,23 @@ if not top_longas.empty:
     )
 
 
-    grafico_desvios["LABEL"] = (
-        grafico_desvios["VARIAVEL"]
+    grafico_longas["LABEL"] = (
+        grafico_longas["VARIAVEL"]
         +
         " | "
         +
-        grafico_desvios["CATEGORIA"]
+        grafico_longas["CATEGORIA"]
     )
 
 
     plt.figure(
-        figsize=(13, 9)
+        figsize=(14, 9)
     )
 
 
     plt.barh(
-        grafico_desvios["LABEL"],
-        grafico_desvios["DIFERENCA_PP"]
+        grafico_longas["LABEL"],
+        grafico_longas["DIFERENCA_PP"]
     )
 
 
@@ -1505,17 +1413,12 @@ if not top_longas.empty:
 
 
     plt.title(
-        "Características mais diferentes da base nas obras >105 dias"
+        "Características mais diferentes da base nas obras com Lead Time >105 dias"
     )
 
 
     plt.xlabel(
-        "Diferença em pontos percentuais vs. população total"
-    )
-
-
-    plt.ylabel(
-        ""
+        "Diferença em pontos percentuais vs. base total"
     )
 
 
@@ -1539,127 +1442,68 @@ if not top_longas.empty:
 
 
 # ============================================================
-# 27. GRÁFICO 5
-# % 0-10 / 11-105 / >105 POR MÊS
+# 26. RESUMO
 # ============================================================
 
-extremos_pivot = (
-    extremos_mensal
-    .pivot(
-        index="MES_CARIMBO",
-        columns="GRUPO_TEMPO",
-        values="PERCENTUAL"
-    )
-    .fillna(0)
-    .reset_index()
+total_validas = (
+    df_valido[COL_ID]
+    .nunique()
 )
 
 
-for col in [
-    "0-10",
-    "11-105",
-    ">105"
-]:
+resumo = pd.DataFrame({
 
-    if col not in extremos_pivot.columns:
-        extremos_pivot[col] = 0
+    "GRUPO": [
+        "TOTAL VÁLIDO",
+        "0-10 DIAS",
+        ">105 DIAS",
+        ">200 DIAS",
+        "NEGATIVOS",
+        "SEM LIB OU ATIVAÇÃO"
+    ],
 
+    "OBRAS": [
+        total_validas,
+        df_rapidas[COL_ID].nunique(),
+        df_longas[COL_ID].nunique(),
+        df_valido[
+            df_valido["LEAD_TIME_DIAS"] > 200
+        ][COL_ID].nunique(),
+        df_negativos[COL_ID].nunique(),
+        df_sem_data[COL_ID].nunique()
+    ]
 
-x = np.arange(
-    len(extremos_pivot)
-)
-
-
-p1 = extremos_pivot["0-10"]
-p2 = extremos_pivot["11-105"]
-p3 = extremos_pivot[">105"]
-
-
-plt.figure(
-    figsize=(14, 7)
-)
-
-
-plt.bar(
-    x,
-    p1,
-    label="0-10 dias"
-)
+})
 
 
-plt.bar(
-    x,
-    p2,
-    bottom=p1,
-    label="11-105 dias"
-)
-
-
-plt.bar(
-    x,
-    p3,
-    bottom=p1 + p2,
-    label=">105 dias"
-)
-
-
-plt.xticks(
-    x,
-    extremos_pivot["MES_CARIMBO"],
-    rotation=45
-)
-
-
-plt.ylim(
-    0,
+resumo["PCT_VALIDAS"] = (
+    resumo["OBRAS"]
+    /
+    max(total_validas, 1)
+    *
     100
-)
-
-
-plt.xlabel(
-    "Mês do Carimbo Centralizado"
-)
-
-
-plt.ylabel(
-    "% das obras"
-)
-
-
-plt.title(
-    "Distribuição percentual do lead time por mês"
-)
-
-
-plt.grid(
-    axis="y",
-    alpha=.3
-)
-
-
-plt.legend()
-
-
-plt.tight_layout()
-
-
-plt.savefig(
-    "05_extremos_por_mes.png",
-    dpi=200,
-    bbox_inches="tight"
-)
-
-
-plt.show()
+).round(2)
 
 
 # ============================================================
-# 28. PRINTS
+# 27. PRINT DOS PRINCIPAIS RESULTADOS
 # ============================================================
 
 print()
 print("=" * 100)
-print("DISTRIBUIÇÃO")
+print("RESUMO")
+print("=" * 100)
+
+print(
+    resumo.to_string(
+        index=False
+    )
+)
+
+
+print()
+print("=" * 100)
+print("FAIXAS ATÉ 200 DIAS")
 print("=" * 100)
 
 print(
@@ -1673,7 +1517,6 @@ print()
 print("=" * 100)
 print("PRINCIPAIS SINAIS - 0 A 10 DIAS")
 print("=" * 100)
-
 
 if not sinais_rapidas.empty:
 
@@ -1690,7 +1533,7 @@ if not sinais_rapidas.empty:
                 "SINAL_DESCRITIVO"
             ]
         ]
-        .head(30)
+        .head(40)
         .to_string(index=False)
     )
 
@@ -1699,7 +1542,6 @@ print()
 print("=" * 100)
 print("PRINCIPAIS SINAIS - >105 DIAS")
 print("=" * 100)
-
 
 if not sinais_longas.empty:
 
@@ -1721,67 +1563,8 @@ if not sinais_longas.empty:
     )
 
 
-print()
-print("=" * 100)
-print("TOP COMBINAÇÕES - >105 DIAS")
-print("=" * 100)
-
-
-if not combinacoes_longas.empty:
-
-    print(
-        combinacoes_longas[
-            [
-                "VARIAVEL",
-                "CATEGORIA",
-                "OBRAS_GRUPO",
-                "PCT_GRUPO",
-                "PCT_BASE",
-                "DIFERENCA_PP",
-                "LIFT",
-                "SINAL_DESCRITIVO"
-            ]
-        ]
-        .head(30)
-        .to_string(index=False)
-    )
-
-
 # ============================================================
-# 29. RESUMO
-# ============================================================
-
-resumo = pd.DataFrame({
-
-    "GRUPO": [
-        "TOTAL VÁLIDO",
-        "0-10 DIAS",
-        ">105 DIAS",
-        "NEGATIVOS",
-        "SEM AS DUAS DATAS"
-    ],
-
-    "OBRAS": [
-        total_obras,
-        df_rapidas[COL_ID].nunique(),
-        df_longas[COL_ID].nunique(),
-        df_negativos[COL_ID].nunique(),
-        df_sem_data[COL_ID].nunique()
-    ],
-
-    "SITES": [
-        total_sites,
-        df_rapidas[COL_SITE].nunique(),
-        df_longas[COL_SITE].nunique(),
-        df_negativos[COL_SITE].nunique(),
-        df_sem_data[COL_SITE].nunique()
-    ]
-
-})
-
-
-# ============================================================
-# 30. EXCEL
+# 28. EXPORTAÇÃO PARA EXCEL
 # ============================================================
 
 print()
@@ -1810,7 +1593,7 @@ with pd.ExcelWriter(
 
     distribuicao.to_excel(
         writer,
-        sheet_name="Faixas_5_dias",
+        sheet_name="Faixas_ate_200",
         index=False
     )
 
@@ -1822,16 +1605,9 @@ with pd.ExcelWriter(
     )
 
 
-    extremos_mensal.to_excel(
-        writer,
-        sheet_name="Extremos_mensal",
-        index=False
-    )
+    if "ESCOPO_META_AJUSTADO" in df_grafico.columns:
 
-
-    if not distribuicao_categoria.empty:
-
-        distribuicao_categoria.to_excel(
+        distribuicao_escopo.to_excel(
             writer,
             sheet_name="Escopo_por_faixa",
             index=False
@@ -1866,13 +1642,6 @@ with pd.ExcelWriter(
     )
 
 
-    combinacoes_longas.to_excel(
-        writer,
-        sheet_name="Combinacoes_105",
-        index=False
-    )
-
-
     df_rapidas.to_excel(
         writer,
         sheet_name="Obras_0_10",
@@ -1887,9 +1656,18 @@ with pd.ExcelWriter(
     )
 
 
+    df_valido[
+        df_valido["LEAD_TIME_DIAS"] > 200
+    ].to_excel(
+        writer,
+        sheet_name="Obras_maior_200",
+        index=False
+    )
+
+
     df_negativos.to_excel(
         writer,
-        sheet_name="Datas_negativas",
+        sheet_name="Lead_negativo",
         index=False
     )
 
@@ -1901,31 +1679,90 @@ with pd.ExcelWriter(
     )
 
 
+# ============================================================
+# 29. AJUSTAR EXCEL
+# ============================================================
+
+from openpyxl import load_workbook
+
+
+wb = load_workbook(
+    ARQUIVO_EXCEL
+)
+
+
+for ws in wb.worksheets:
+
+    ws.freeze_panes = "A2"
+
+    ws.auto_filter.ref = (
+        ws.dimensions
+    )
+
+
+    for coluna in ws.columns:
+
+        letra = (
+            coluna[0]
+            .column_letter
+        )
+
+        maior = 0
+
+
+        for celula in coluna[:300]:
+
+            if celula.value is not None:
+
+                maior = max(
+                    maior,
+                    len(str(celula.value))
+                )
+
+
+        ws.column_dimensions[
+            letra
+        ].width = min(
+            maior + 2,
+            45
+        )
+
+
+wb.save(
+    ARQUIVO_EXCEL
+)
+
+
+# ============================================================
+# 30. FINAL
+# ============================================================
+
 print()
 print("=" * 80)
-print("FINALIZADO")
+print("ESTUDO FINALIZADO")
 print("=" * 80)
+
+print(
+    f"Lead time utilizado: "
+    f"{COL_ATIVACAO} - {COL_LIB}"
+)
 
 print(
     f"Excel: {ARQUIVO_EXCEL}"
 )
 
 print(
-    "Gráfico 1: 01_faixas_por_escopo.png"
+    "01_lead_time_por_escopo.png"
 )
 
 print(
-    "Gráfico 2: 02_percentual_escopo_por_faixa.png"
+    "02_percentual_escopo_por_lead_time.png"
 )
 
 print(
-    "Gráfico 3: 03_evolucao_mensal.png"
+    "03_evolucao_mensal_lead_time.png"
 )
 
 print(
-    "Gráfico 4: 04_desvios_maior_105.png"
-)
-
-print(
-    "Gráfico 5: 05_extremos_por_mes.png"
+    "04_desvios_maior_105.png"
 )
