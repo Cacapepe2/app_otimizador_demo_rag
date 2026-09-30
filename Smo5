@@ -1,0 +1,667 @@
+import os
+import re
+import unicodedata
+import warnings
+
+import numpy as np
+import pandas as pd
+from Conntomysql import Conntomysql
+
+
+# ============================================================
+# CONFIGURACAO
+# ============================================================
+c = Conntomysql()
+banco = 'prod'
+
+pasta_base_analises = f'{c.folder_03}/ENGENHARIA/RF/Smart Otimization'
+pasta_destino_analises = f'{c.folder_03}/ENGENHARIA/RF/Smart Otimization'
+
+nome_arquivo = 'EngineeringParameters_0'
+arquivo_original = os.path.join(pasta_base_analises, f'{nome_arquivo}.xlsx')
+arquivo_atualizado = os.path.join(pasta_destino_analises, f'{nome_arquivo}_atualizado.xlsx')
+
+DATABASE_SAIDA = 'cadastro'
+TABELA_SAIDA = 'SmartOtimization_5G'
+
+# Colunas EXATAMENTE iguais e na mesma ordem do TEMPLATE.xlsx enviado.
+TEMPLATE_COLUMNS = [
+    'gNodeB Name', 'Cell Name', 'gNodeB ID', 'Cell ID', 'PCI', 'TAC',
+    'Latitude', 'Longitude', 'Antenna Latitude', 'Antenna Longitude', 'Height',
+    'Azimuth', 'Mechanical Downtilt', 'Antenna Model', 'isOutdoor', 'DLNARFCN',
+    'ULNARFCN', 'Sectorization', 'MCC', 'MNC', 'Duplex Model', 'Frequency Band',
+    'UlBandWidth', 'DlBandWidth', 'Active', 'Max Power', 'Beam Scenario',
+    'Digital Tilt', 'Digital Azimuth', 'TxRx Mode', 'Transceiver Name',
+    'Main Propagation Model', 'Main Calculation Radius', 'PDSCH to RS',
+    'MaxSsbPwrOffset', 'CSI to RS', 'Total Loss(DL)', 'SlotAssignment',
+    'BeamDensitySwitch', 'SlotStructure', 'Electrical Downtilt', 'SCS',
+    'Physical Site Name', 'NrDUCellTRPId', 'SsbNARFCN', 'Site Type', 'Scenario',
+    'City', 'Region', 'High-Speed Rail Way Side Cell', 'High-Speed Rail Station',
+    'High-Speed Rail Way Cell', 'High-Speed Rail Way Exclusive Cell', 'TRPNAME',
+    'Site Scenario', 'OMC', 'Cell Individual Offset', 'UlArfcnConfigInd',
+    'Traffic Priority', 'CA Switch(DL)', 'CA Switch(UL)', 'Inter-site CA',
+    'DSS Switch', 'DSS Share Ratio', 'UL Comp Switch', 'SsbDescMethod', 'IsVIP',
+    'SsbNumToAverage', 'SsbConsolidationThld', 'Frame Configuration',
+    'Frame Parameter', 'Frequency Band Info', 'CoNrDuCellId',
+    'PrachConfigurationIndex', 'SectorID', 'TAL', 'Vendor', 'AreaName',
+    'MetroLineNumber', 'MetroCellFlag', 'RanShareMode', 'CellOperator',
+    'COMBINEDID', 'NrDuCellId', 'NrNetworkingOption', 'Address',
+    'Number of Transmission Antennas', 'RS Power', 'Cluster No', 'Mesh',
+    'SsbTimePos', 'MicroCellRemote', 'RRU Serial Number', 'Inventory Cluster',
+    'Max EIRP', 'Aerial Cell Flag', 'Air Max SSB Power Offset',
+    'Air Coverage Scenario', 'Time Domain Reservation Mode', 'GSCN',
+    'Tridimensional Communication Mode', 'Air Azimuth', 'Air Tilt',
+    'NR RS Cell ID', 'Altitude', 'RET DeviceNo'
+]
+
+# Colunas do Science que sao usadas nas regras do template.
+SCIENCE_COLUMNS = (
+    '`SIG_SITE`,`SIG_LOGICA`,`SIG_ERB`,`DES_AREA_TARIFACAO`,`SIG_ESTADO`,'
+    '`NOM_MUNICIPIO`,`NUM_LATITUDE_DECIMAL`,`NUM_LONGITUDE_DECIMAL`,'
+    '`NUM_ALTURA`,`NUM_AZIMUTE_ANTENA`,`NUM_TILT_MECAN_ANTENA`,'
+    '`DES_MODELO_ANTENA`,`STS_COBERTURA`,`[C]CGI`'
+)
+
+
+# ============================================================
+# DOWNLOAD DAS BASES
+# ============================================================
+def EXEC_QUERY_5G():
+    """Baixa somente celulas NR ativas do Science."""
+    tabela = 'query_rf_dados_bcv_science'
+    database = 'science'
+    return c.read_sql(
+        database,
+        tabela,
+        banco,
+        colunas=SCIENCE_COLUMNS,
+        where="(STATUS IN ('A')) AND (SIG_TECNOLOGIA IN ('NR'))"
+    )
+
+
+def EXEC_ERICSSON_5G():
+    """Baixa a base 5G Ericsson."""
+    tabela = 'ericsson_5g_cell_rede'
+    database = 'sigla_logica_rf'
+    return c.read_sql(database, tabela, banco)
+
+
+def EXEC_HUAWEI_5G():
+    """Baixa a base 5G Huawei."""
+    tabela = 'huawei_5g_cell_rede'
+    database = 'sigla_logica_rf'
+    return c.read_sql(database, tabela, banco)
+
+
+# ============================================================
+# FUNCOES AUXILIARES
+# ============================================================
+def _normalize(value):
+    """Normaliza texto para comparacao/saida: sem acento, maiusculo e '_' entre palavras."""
+    if pd.isna(value):
+        return ''
+    value = str(value).strip()
+    if not value:
+        return ''
+    value = unicodedata.normalize('NFKD', value)
+    value = ''.join(ch for ch in value if not unicodedata.combining(ch))
+    value = value.upper()
+    value = re.sub(r'[^A-Z0-9]+', '_', value)
+    return value.strip('_')
+
+
+def _normalize_key_piece(value):
+    if pd.isna(value):
+        return ''
+    return str(value).strip().upper()
+
+
+def _make_merge_key(cell, uf):
+    cell = _normalize_key_piece(cell)
+    uf = _normalize_key_piece(uf)
+    if not cell or not uf:
+        return ''
+    return f'{cell}|{uf}'
+
+
+def _make_city(row):
+    # Regra solicitada: SIG_ESTADO + NOM_MUNICIPIO.
+    uf = _normalize(row.get('SIG_ESTADO'))
+    cidade = _normalize(row.get('NOM_MUNICIPIO'))
+    if uf and cidade:
+        return f'{uf}_{cidade}'
+    return uf or cidade
+
+
+def _build_region(state, area):
+    # Regra solicitada usando SIG_ESTADO + DES_AREA_TARIFACAO (DDD).
+    uf = _normalize(state)
+
+    try:
+        area_code = str(int(float(area)))
+    except (TypeError, ValueError):
+        area_code = re.sub(r'\D+', '', str(area)) if not pd.isna(area) else ''
+
+    if uf in {'BA', 'SE'}:
+        return 'BASE'
+    if uf in {'RJ', 'ES'}:
+        return 'RJES'
+    if uf == 'MG':
+        return 'MG'
+    if uf == 'SP':
+        return 'SPI' if area_code in {'12', '14', '19'} else 'SPC'
+    if uf == 'RS':
+        return 'RS'
+    if uf in {'PR', 'SC'}:
+        return 'PRSC'
+
+    region_map = {
+        'AM': 'N', 'RR': 'N', 'PA': 'N', 'MA': 'N', 'AP': 'N',
+        'CE': 'NE', 'PI': 'NE', 'RN': 'NE', 'PE': 'NE', 'AL': 'NE', 'PB': 'NE',
+        'MT': 'CO', 'DF': 'CO', 'RO': 'CO', 'MS': 'CO', 'AC': 'CO', 'TO': 'CO', 'GO': 'CO',
+    }
+    return region_map.get(uf, '')
+
+
+def _series(df, column, default=np.nan):
+    """Retorna a coluna ou uma Series vazia com o mesmo indice."""
+    if column in df.columns:
+        return df[column]
+    return pd.Series(default, index=df.index)
+
+
+def _first_existing_series(df, columns, default=np.nan):
+    """Coalesce de colunas: usa o primeiro valor nao nulo encontrado por linha."""
+    result = pd.Series(default, index=df.index)
+    for column in columns:
+        if column in df.columns:
+            current = df[column]
+            mask = result.isna() | result.astype('string').str.strip().eq('')
+            result = result.where(~mask, current)
+    return result
+
+
+def _to_numeric(series):
+    return pd.to_numeric(series, errors='coerce')
+
+
+def _blank_mask(series):
+    text = series.astype('string').str.strip()
+    return series.isna() | text.eq('') | text.eq('<NA>') | text.str.lower().eq('nan')
+
+
+def _clean_bandwidth(series):
+    """Converte 100 MHz / 100 / 100M para o formato 100M."""
+    s = series.astype('string').str.strip()
+    s = s.str.replace(' ', '', regex=False)
+    s = s.str.replace(r'(?i)MHZ$', 'M', regex=True)
+    s = s.str.replace(r'(?i)HZ$', '', regex=True)
+    s = s.str.replace(r'\.0(?=M?$)', '', regex=True)
+    valid = ~(series.isna() | s.eq('') | s.eq('<NA>'))
+    needs_m = valid & ~s.str.upper().str.endswith('M', na=False)
+    s = s.where(~needs_m, s + 'M')
+    return s.where(valid, np.nan)
+
+
+def _clean_frequency_band_ericsson(series):
+    """Converte [78] / 78 / N78 para N78."""
+    s = series.astype('string').str.strip()
+    s = s.str.replace('[', '', regex=False).str.replace(']', '', regex=False)
+    s = s.str.replace(r'(?i)^N', '', regex=True)
+    valid = ~(series.isna() | s.eq('') | s.eq('<NA>'))
+    s = ('N' + s).where(valid, np.nan)
+    return s
+
+
+def _slot_assignment_huawei(series):
+    """
+    Huawei:
+      Dual-period 8:2 Slot Assignment -> 8_2_DDDSUUDDDD
+      4:1                         -> 4_1_DDDSU
+    """
+    def convert(value):
+        if pd.isna(value):
+            return np.nan
+        match = re.search(r'(\d+)\s*:\s*(\d+)', str(value))
+        if not match:
+            return np.nan
+        dl_slots = int(match.group(1))
+        ul_slots = int(match.group(2))
+        ratio = f'{dl_slots}_{ul_slots}'
+        if (dl_slots, ul_slots) == (8, 2):
+            return f'{ratio}_DDDSUUDDDD'
+        if (dl_slots, ul_slots) == (4, 1):
+            return f'{ratio}_DDDSU'
+        # Para uma configuracao diferente das duas regras fornecidas,
+        # mantem somente a razao para nao inventar uma estrutura de slots.
+        return ratio
+
+    return series.apply(convert)
+
+
+def _gscn_to_narfcn_value(gscn):
+    """
+    Converte SSB Frequency Position (GSCN) para SsbNARFCN.
+
+    Exemplos validados:
+      5287 -> 422930
+      7811 -> 629952
+    """
+    if pd.isna(gscn):
+        return pd.NA
+
+    try:
+        g = int(float(gscn))
+    except (TypeError, ValueError):
+        return pd.NA
+
+    if g < 0:
+        return pd.NA
+
+    # GSCN 0..7498: SSREF = N*1.2 MHz + M*0.05 MHz
+    if g < 7499:
+        remainder = g % 3
+        if remainder == 0:
+            m = 3
+            n = g // 3
+        elif remainder == 1:
+            m = 5
+            n = (g - 1) // 3
+        else:
+            m = 1
+            n = (g + 1) // 3
+
+        freq_mhz = n * 1.2 + m * 0.05
+        narfcn = freq_mhz / 0.005
+
+    # GSCN 7499..22256: SSREF = 3000 + (GSCN-7499)*1.44 MHz
+    elif g <= 22256:
+        freq_mhz = 3000 + (g - 7499) * 1.44
+        narfcn = 600000 + (freq_mhz - 3000) / 0.015
+
+    # Acima de 24.25008 GHz
+    else:
+        freq_mhz = 24250.08 + (g - 22256) * 17.28
+        narfcn = 2016667 + (freq_mhz - 24250.08) / 0.06
+
+    return int(round(narfcn))
+
+
+def _gscn_to_narfcn(series):
+    return pd.Series(
+        [_gscn_to_narfcn_value(v) for v in series],
+        index=series.index,
+        dtype='Int64'
+    )
+
+
+def _dedupe_best_row(df, key_column, label):
+    """Se houver duplicidade de chave, mantem a linha com mais campos preenchidos."""
+    if df.empty or key_column not in df.columns:
+        return df
+
+    duplicated = df[key_column].ne('') & df[key_column].duplicated(keep=False)
+    if duplicated.any():
+        print(f'[AVISO] {label}: {duplicated.sum()} linhas em chaves duplicadas. '
+              'Sera mantida a linha mais preenchida de cada chave.')
+
+    temp = df.copy()
+    temp['_nonnull_count'] = temp.notna().sum(axis=1)
+    temp = temp.sort_values('_nonnull_count', ascending=False)
+    temp = temp.drop_duplicates(subset=[key_column], keep='first')
+    return temp.drop(columns=['_nonnull_count'])
+
+
+def _prefix_vendor_columns(df, prefix):
+    rename_map = {
+        col: f'{prefix}__{col}'
+        for col in df.columns
+        if col != '_merge_key'
+    }
+    return df.rename(columns=rename_map)
+
+
+def _prepare_science(science):
+    science = science.copy()
+    science['_merge_key'] = [
+        _make_merge_key(cell, uf)
+        for cell, uf in zip(science['SIG_LOGICA'], science['SIG_ESTADO'])
+    ]
+    science = science[science['_merge_key'].ne('')].copy()
+    science = _dedupe_best_row(science, '_merge_key', 'SCIENCE_5G')
+    return science
+
+
+def _prepare_ericsson(ericsson):
+    ericsson = ericsson.copy()
+
+    if 'NRCellDUId' not in ericsson.columns or 'NodeId' not in ericsson.columns:
+        raise KeyError("A base Ericsson precisa conter 'NRCellDUId' e 'NodeId'.")
+
+    ericsson['_uf_key'] = ericsson['NodeId'].astype('string').str.strip().str[-2:]
+    ericsson['_merge_key'] = [
+        _make_merge_key(cell, uf)
+        for cell, uf in zip(ericsson['NRCellDUId'], ericsson['_uf_key'])
+    ]
+    ericsson = ericsson[ericsson['_merge_key'].ne('')].copy()
+    ericsson = _dedupe_best_row(ericsson, '_merge_key', 'ERICSSON_5G')
+    ericsson = ericsson.drop(columns=['_uf_key'], errors='ignore')
+    return _prefix_vendor_columns(ericsson, 'ER')
+
+
+def _prepare_huawei(huawei):
+    huawei = huawei.copy()
+
+    if 'NR DU Cell Name' not in huawei.columns or 'Site Name' not in huawei.columns:
+        raise KeyError("A base Huawei precisa conter 'NR DU Cell Name' e 'Site Name'.")
+
+    huawei['_uf_key'] = huawei['Site Name'].astype('string').str.strip().str[-2:]
+    huawei['_merge_key'] = [
+        _make_merge_key(cell, uf)
+        for cell, uf in zip(huawei['NR DU Cell Name'], huawei['_uf_key'])
+    ]
+    huawei = huawei[huawei['_merge_key'].ne('')].copy()
+    huawei = _dedupe_best_row(huawei, '_merge_key', 'HUAWEI_5G')
+    huawei = huawei.drop(columns=['_uf_key'], errors='ignore')
+    return _prefix_vendor_columns(huawei, 'HW')
+
+
+def _build_unified_base(science, ericsson, huawei):
+    """
+    Faz os merges pelas chaves definidas nos comentarios:
+      Science: SIG_LOGICA + SIG_ESTADO
+      Ericsson: NRCellDUId + UF (2 ultimos caracteres de NodeId)
+      Huawei: NR DU Cell Name + UF (2 ultimos caracteres de Site Name)
+
+    Mantem TODAS as celulas NR ativas do Science. Uma celula antiga que nao esta
+    mais no Science ativo nao entra na saida atualizada.
+    """
+    science = _prepare_science(science)
+    ericsson = _prepare_ericsson(ericsson)
+    huawei = _prepare_huawei(huawei)
+
+    er = science.merge(ericsson, on='_merge_key', how='inner')
+    er['_VENDOR_SOURCE'] = 'ERICSSON'
+
+    hw = science.merge(huawei, on='_merge_key', how='inner')
+    hw['_VENDOR_SOURCE'] = 'HUAWEI'
+
+    er_keys = set(er['_merge_key'])
+    hw_keys = set(hw['_merge_key'])
+    overlap = er_keys & hw_keys
+    if overlap:
+        print(f'[AVISO] {len(overlap)} chave(s) apareceram nas duas bases de vendor. '
+              'Sera escolhida a linha com maior quantidade de campos preenchidos.')
+
+    matched = pd.concat([er, hw], ignore_index=True, sort=False)
+    if not matched.empty:
+        matched['_vendor_nonnull'] = matched.notna().sum(axis=1)
+        matched = matched.sort_values('_vendor_nonnull', ascending=False)
+        matched = matched.drop_duplicates(subset=['_merge_key'], keep='first')
+        matched = matched.drop(columns=['_vendor_nonnull'])
+
+    matched_keys = set(matched['_merge_key']) if not matched.empty else set()
+    unmatched = science[~science['_merge_key'].isin(matched_keys)].copy()
+    unmatched['_VENDOR_SOURCE'] = np.nan
+
+    unified = pd.concat([matched, unmatched], ignore_index=True, sort=False)
+
+    print(f'[INFO] Science ativo NR: {len(science):,}')
+    print(f'[INFO] Casados com Ericsson: {len(er):,}')
+    print(f'[INFO] Casados com Huawei: {len(hw):,}')
+    print(f'[INFO] Sem casamento de vendor: {len(unmatched):,}')
+
+    return unified
+
+
+# ============================================================
+# POPULACAO DO TEMPLATE
+# ============================================================
+def _populate_template(base):
+    out = pd.DataFrame(index=base.index, columns=TEMPLATE_COLUMNS)
+
+    # --------------------------------------------------------
+    # CAMPOS COMUNS / SCIENCE
+    # --------------------------------------------------------
+    sig_erb = _series(base, 'SIG_ERB').astype('string').str.strip()
+    sig_estado = _series(base, 'SIG_ESTADO').astype('string').str.strip().str.upper()
+    valid_gnb_name = ~(sig_erb.isna() | sig_estado.isna() | sig_erb.eq('') | sig_estado.eq(''))
+    out['gNodeB Name'] = (sig_erb + '_' + sig_estado).where(valid_gnb_name, np.nan)
+
+    out['Cell Name'] = _series(base, 'SIG_LOGICA').astype('string').str.strip()
+
+    # Latitude/Longitude ficam numericos. Em Excel PT-BR, o separador decimal e exibido como virgula.
+    out['Latitude'] = _to_numeric(_series(base, 'NUM_LATITUDE_DECIMAL'))
+    out['Longitude'] = _to_numeric(_series(base, 'NUM_LONGITUDE_DECIMAL'))
+    out['Height'] = _to_numeric(_series(base, 'NUM_ALTURA'))
+    out['Azimuth'] = _to_numeric(_series(base, 'NUM_AZIMUTE_ANTENA'))
+    out['Mechanical Downtilt'] = _to_numeric(_series(base, 'NUM_TILT_MECAN_ANTENA'))
+    out['Antenna Model'] = _series(base, 'DES_MODELO_ANTENA')
+
+    # isOutdoor: O/OUTDOOR = YES; qualquer outro valor = NO.
+    coverage = _series(base, 'STS_COBERTURA').astype('string').str.upper().str.strip()
+    out['isOutdoor'] = np.where(coverage.isin(['O', 'OUTDOOR']), 'YES', 'NO')
+
+    antenna_model = out['Antenna Model'].astype('string')
+    out['Sectorization'] = np.where(
+        antenna_model.str.contains('OMNI', case=False, na=False),
+        'OMNI',
+        'SECTORIZE'
+    )
+
+    cgi = _series(base, '[C]CGI').astype('string')
+    cgi_parts = cgi.str.split('-', expand=True)
+    if cgi_parts.shape[1] >= 1:
+        out['MCC'] = cgi_parts[0]
+    if cgi_parts.shape[1] >= 2:
+        out['MNC'] = cgi_parts[1]
+
+    out['Active'] = 'YES'
+    out['City'] = base.apply(_make_city, axis=1)
+    out['Region'] = base.apply(
+        lambda row: _build_region(row.get('SIG_ESTADO'), row.get('DES_AREA_TARIFACAO')),
+        axis=1
+    )
+
+    sector = out['Cell Name'].astype('string').str[-1]
+    out['SectorID'] = sector.apply(
+        lambda x: int(x) if pd.notna(x) and str(x).isdigit() else (np.nan if pd.isna(x) else x)
+    )
+
+    out['Vendor'] = _series(base, '_VENDOR_SOURCE')
+
+    # --------------------------------------------------------
+    # ERICSSON
+    # --------------------------------------------------------
+    er_mask = _series(base, '_VENDOR_SOURCE').eq('ERICSSON')
+
+    er_gnb_id = _series(base, 'ER__gNBId')
+    er_cell_id = _series(base, 'ER__cellLocalId')
+    er_pci = _series(base, 'ER__nRPCI')
+    er_dl_narfcn = _series(base, 'ER__arfcnDL')
+
+    out.loc[er_mask, 'gNodeB ID'] = er_gnb_id[er_mask]
+    out.loc[er_mask, 'Cell ID'] = er_cell_id[er_mask]
+    out.loc[er_mask, 'PCI'] = er_pci[er_mask]
+    out.loc[er_mask, 'DLNARFCN'] = er_dl_narfcn[er_mask]
+
+    er_duplex = _series(base, 'ER__tddSpecialSlotPattern').astype('string').str.strip().str[:3].str.upper()
+    er_duplex_valid = er_mask & ~_blank_mask(er_duplex)
+    out.loc[er_duplex_valid, 'Duplex Model'] = 'CELL_' + er_duplex[er_duplex_valid]
+
+    er_band = _clean_frequency_band_ericsson(_series(base, 'ER__bandListManual'))
+    out.loc[er_mask, 'Frequency Band'] = er_band[er_mask]
+
+    er_ul_bw = _clean_bandwidth(_series(base, 'ER__bSChannelBwUL'))
+    er_dl_bw = _clean_bandwidth(_series(base, 'ER__bSChannelBwDL'))
+    out.loc[er_mask, 'UlBandWidth'] = er_ul_bw[er_mask]
+    out.loc[er_mask, 'DlBandWidth'] = er_dl_bw[er_mask]
+
+    # Ericsson: SlotAssignment permanece vazio conforme comentario do TXT.
+    er_ssb = _to_numeric(_series(base, 'ER__ssbFrequency'))
+    out.loc[er_mask, 'SsbNARFCN'] = er_ssb[er_mask]
+
+    # --------------------------------------------------------
+    # HUAWEI
+    # --------------------------------------------------------
+    hw_mask = _series(base, '_VENDOR_SOURCE').eq('HUAWEI')
+
+    # O TXT original apontava NR DU Cell Name para gNodeB ID, mas o proprio template
+    # enviado mostra gNodeB ID numerico. Por isso, se a tabela possuir um campo de ID
+    # explicito, ele e priorizado; NR DU Cell Name fica como ultimo fallback.
+    hw_gnb_id = _first_existing_series(
+        base,
+        ['HW__gNodeB ID', 'HW__gNodeBId', 'HW__gNBId', 'HW__NR DU Cell Name']
+    )
+    hw_cell_id = _series(base, 'HW__Cell ID')
+    hw_pci = _series(base, 'HW__Physical Cell ID')
+    hw_dl_narfcn = _series(base, 'HW__Downlink NARFCN')
+
+    out.loc[hw_mask, 'gNodeB ID'] = hw_gnb_id[hw_mask]
+    out.loc[hw_mask, 'Cell ID'] = hw_cell_id[hw_mask]
+    out.loc[hw_mask, 'PCI'] = hw_pci[hw_mask]
+    out.loc[hw_mask, 'DLNARFCN'] = hw_dl_narfcn[hw_mask]
+
+    hw_duplex = _series(base, 'HW__Duplex Mode').astype('string').str.strip().str.upper()
+    hw_duplex_valid = hw_mask & ~_blank_mask(hw_duplex)
+    out.loc[hw_duplex_valid, 'Duplex Model'] = 'CELL_' + hw_duplex[hw_duplex_valid]
+
+    out.loc[hw_mask, 'Frequency Band'] = _series(base, 'HW__Frequency Band')[hw_mask]
+
+    hw_ul_bw = _clean_bandwidth(_series(base, 'HW__Uplink Bandwidth'))
+    hw_dl_bw = _clean_bandwidth(_series(base, 'HW__Downlink Bandwidth'))
+    out.loc[hw_mask, 'UlBandWidth'] = hw_ul_bw[hw_mask]
+    out.loc[hw_mask, 'DlBandWidth'] = hw_dl_bw[hw_mask]
+
+    hw_slot = _slot_assignment_huawei(_series(base, 'HW__Slot Assignment'))
+    out.loc[hw_mask, 'SlotAssignment'] = hw_slot[hw_mask]
+
+    # Huawei: SSB Frequency Position = GSCN; dele calculamos o SsbNARFCN.
+    hw_gscn = _to_numeric(_series(base, 'HW__SSB Frequency Position'))
+    out.loc[hw_mask, 'GSCN'] = hw_gscn[hw_mask]
+    hw_ssb_narfcn = _gscn_to_narfcn(hw_gscn)
+    out.loc[hw_mask, 'SsbNARFCN'] = hw_ssb_narfcn[hw_mask]
+
+    # Garante exatamente as 106 colunas e exatamente a ordem do template.
+    out = out.reindex(columns=TEMPLATE_COLUMNS)
+    return out
+
+
+# ============================================================
+# ATUALIZACAO DO EXCEL EXISTENTE SEM ALTERAR O ORIGINAL
+# ============================================================
+def _excel_key(df):
+    gnb = df['gNodeB Name'].astype('string').str.strip().str.upper()
+    cell = df['Cell Name'].astype('string').str.strip().str.upper()
+    valid = ~(gnb.isna() | cell.isna() | gnb.eq('') | cell.eq(''))
+    key = gnb.fillna('') + '|' + cell.fillna('')
+    return key.where(valid, '')
+
+
+def _align_old_excel_columns(old_df):
+    old_df = old_df.copy()
+    for col in TEMPLATE_COLUMNS:
+        if col not in old_df.columns:
+            old_df[col] = np.nan
+    return old_df.reindex(columns=TEMPLATE_COLUMNS)
+
+
+def _merge_with_existing_excel(current_df):
+    """
+    Usa gNodeB Name + Cell Name como chave.
+
+    - O conjunto de linhas da saida e o Science NR ativo atual.
+    - Linhas que existiam no Excel antigo mas nao existem mais no Science ativo sao removidas.
+    - Valores recalculados/preenchidos pela base nova atualizam o Excel.
+    - Se uma coluna nova vier vazia, preserva o valor antigo daquela celula.
+    - O arquivo original nunca e sobrescrito.
+    """
+    if not os.path.exists(arquivo_original):
+        raise FileNotFoundError(f'Arquivo original nao encontrado: {arquivo_original}')
+
+    old_df = pd.read_excel(arquivo_original, sheet_name=0)
+    old_df = _align_old_excel_columns(old_df)
+
+    current = current_df.copy()
+    current['_excel_key'] = _excel_key(current)
+    old_df['_excel_key'] = _excel_key(old_df)
+
+    current = current[current['_excel_key'].ne('')].copy()
+    old_df = old_df[old_df['_excel_key'].ne('')].copy()
+
+    current = _dedupe_best_row(current, '_excel_key', 'BASE_ATUAL_GERADA')
+    old_df = _dedupe_best_row(old_df, '_excel_key', 'EXCEL_ANTIGO')
+
+    merged = current.merge(
+        old_df,
+        on='_excel_key',
+        how='left',
+        suffixes=('', '__old')
+    )
+
+    # gNodeB Name e Cell Name sempre ficam com os valores atuais.
+    key_columns = {'gNodeB Name', 'Cell Name'}
+
+    for col in TEMPLATE_COLUMNS:
+        old_col = f'{col}__old'
+        if col in key_columns or old_col not in merged.columns:
+            continue
+
+        blank = _blank_mask(merged[col])
+        merged.loc[blank, col] = merged.loc[blank, old_col]
+
+    result = merged.reindex(columns=TEMPLATE_COLUMNS)
+    return result
+
+
+def _save_updated_excel(df):
+    os.makedirs(pasta_destino_analises, exist_ok=True)
+
+    # Mantem o nome da primeira aba do arquivo original.
+    excel_file = pd.ExcelFile(arquivo_original)
+    sheet_name = excel_file.sheet_names[0] if excel_file.sheet_names else 'Engineering Parameters'
+
+    # IMPORTANTE: grava em _atualizado; o EngineeringParameters_0.xlsx original nao e alterado.
+    df.to_excel(arquivo_atualizado, index=False, sheet_name=sheet_name)
+    print(f'[OK] Excel atualizado criado em: {arquivo_atualizado}')
+
+
+# ============================================================
+# EXECUCAO PRINCIPAL
+# ============================================================
+def main():
+    print('[1/6] Baixando Science 5G...')
+    science_5g = EXEC_QUERY_5G()
+
+    print('[2/6] Baixando Ericsson 5G...')
+    ericsson_5g = EXEC_ERICSSON_5G()
+
+    print('[3/6] Baixando Huawei 5G...')
+    huawei_5g = EXEC_HUAWEI_5G()
+
+    print('[4/6] Fazendo merges e populando o template...')
+    unified = _build_unified_base(science_5g, ericsson_5g, huawei_5g)
+    generated = _populate_template(unified)
+
+    # Validacao explicita das duas conversoes que foram conferidas manualmente.
+    assert _gscn_to_narfcn_value(5287) == 422930, 'Falha na conversao GSCN 5287.'
+    assert _gscn_to_narfcn_value(7811) == 629952, 'Falha na conversao GSCN 7811.'
+
+    print('[5/6] Atualizando dados com o Excel antigo, sem altera-lo...')
+    atualizado = _merge_with_existing_excel(generated)
+    _save_updated_excel(atualizado)
+
+    print('[6/6] Gravando a mesma base final no banco...')
+    database = DATABASE_SAIDA
+    tabela = TABELA_SAIDA
+    c.to_sql(atualizado, database, tabela, banco)
+    print(f'[OK] Banco atualizado: {database}.{tabela}')
+
+    print(f'[OK] Total final de celulas: {len(atualizado):,}')
+    return atualizado
+
+
+if __name__ == '__main__':
+    with warnings.catch_warnings():
+        warnings.simplefilter('default')
+        main()
