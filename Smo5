@@ -295,19 +295,56 @@ def _gscn_to_narfcn(series):
     )
 
 
+def _save_duplicate_diagnostic(duplicated_df, key_column, label):
+    """Salva as linhas envolvidas em chaves duplicadas para conferencia."""
+    if duplicated_df.empty:
+        return
+
+    os.makedirs(pasta_destino_analises, exist_ok=True)
+    safe_label = re.sub(r'[^A-Za-z0-9_-]+', '_', str(label)).strip('_')
+    diagnostic_path = os.path.join(
+        pasta_destino_analises,
+        f'duplicidades_{safe_label}.xlsx'
+    )
+
+    diagnostic = duplicated_df.copy()
+    diagnostic = diagnostic.sort_values(key_column, kind='stable')
+    diagnostic.to_excel(diagnostic_path, index=False)
+    print(f'[INFO] Diagnostico de duplicidades salvo em: {diagnostic_path}')
+
+
 def _dedupe_best_row(df, key_column, label):
-    """Se houver duplicidade de chave, mantem a linha com mais campos preenchidos."""
+    """
+    Se houver duplicidade da chave de merge, salva o diagnostico e mantem
+    uma unica linha por chave: a linha com maior quantidade de campos preenchidos.
+    """
     if df.empty or key_column not in df.columns:
         return df
 
-    duplicated = df[key_column].ne('') & df[key_column].duplicated(keep=False)
-    if duplicated.any():
-        print(f'[AVISO] {label}: {duplicated.sum()} linhas em chaves duplicadas. '
-              'Sera mantida a linha mais preenchida de cada chave.')
+    duplicate_mask = df[key_column].ne('') & df[key_column].duplicated(keep=False)
+    if duplicate_mask.any():
+        duplicated = df.loc[duplicate_mask].copy()
+        qtd_linhas = len(duplicated)
+        qtd_chaves = duplicated[key_column].nunique(dropna=True)
+
+        print(
+            f'[AVISO] {label}: {qtd_chaves:,} chave(s) duplicada(s), '
+            f'afetando {qtd_linhas:,} linha(s). '
+            'Sera mantida a linha mais preenchida de cada chave.'
+        )
+        _save_duplicate_diagnostic(duplicated, key_column, label)
 
     temp = df.copy()
-    temp['_nonnull_count'] = temp.notna().sum(axis=1)
-    temp = temp.sort_values('_nonnull_count', ascending=False)
+
+    # Conta campos realmente preenchidos. String vazia tambem e considerada vazia.
+    filled_count = pd.Series(0, index=temp.index, dtype='int64')
+    for col in temp.columns:
+        if col == key_column:
+            continue
+        filled_count += (~_blank_mask(temp[col])).astype('int64')
+
+    temp['_nonnull_count'] = filled_count
+    temp = temp.sort_values('_nonnull_count', ascending=False, kind='stable')
     temp = temp.drop_duplicates(subset=[key_column], keep='first')
     return temp.drop(columns=['_nonnull_count'])
 
@@ -506,13 +543,9 @@ def _populate_template(base):
     # --------------------------------------------------------
     hw_mask = _series(base, '_VENDOR_SOURCE').eq('HUAWEI')
 
-    # O TXT original apontava NR DU Cell Name para gNodeB ID, mas o proprio template
-    # enviado mostra gNodeB ID numerico. Por isso, se a tabela possuir um campo de ID
-    # explicito, ele e priorizado; NR DU Cell Name fica como ultimo fallback.
-    hw_gnb_id = _first_existing_series(
-        base,
-        ['HW__gNodeB ID', 'HW__gNodeBId', 'HW__gNBId', 'HW__NR DU Cell Name']
-    )
+    # Huawei: o campo gNodeB ID possui exatamente este nome na tabela.
+    # A coluna NR DU Cell Name e usada apenas na chave/celula, nao como gNodeB ID.
+    hw_gnb_id = _series(base, 'HW__gNodeB ID')
     hw_cell_id = _series(base, 'HW__Cell ID')
     hw_pci = _series(base, 'HW__Physical Cell ID')
     hw_dl_narfcn = _series(base, 'HW__Downlink NARFCN')
@@ -607,8 +640,15 @@ def _merge_with_existing_excel(current_df):
         if col in key_columns or old_col not in merged.columns:
             continue
 
-        blank = _blank_mask(merged[col])
-        merged.loc[blank, col] = merged.loc[blank, old_col]
+        # Pandas recente pode criar colunas com dtype string estrito. O Excel antigo
+        # pode ter numero/float nessa mesma coluna. Converter ambos para object evita
+        # o erro: TypeError: Invalid value for dtype 'str'.
+        atual = merged[col].astype(object)
+        antigo = merged[old_col].astype(object)
+        blank = _blank_mask(atual)
+
+        # Valor atual preenchido tem prioridade. Se estiver vazio, preserva o antigo.
+        merged[col] = atual.where(~blank, antigo)
 
     result = merged.reindex(columns=TEMPLATE_COLUMNS)
     return result
