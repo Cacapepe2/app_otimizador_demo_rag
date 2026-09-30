@@ -24,6 +24,17 @@ arquivo_atualizado = os.path.join(pasta_destino_analises, f'{nome_arquivo}_atual
 DATABASE_SAIDA = 'cadastro'
 TABELA_SAIDA = 'SmartOtimization_5G'
 
+# Campos auxiliares que NAO fazem parte do Excel/template, mas serao
+# enviados ao banco para uso em filtros e analises no BI.
+BANCO_EXTRA_COLUMNS = [
+    'SIG_SITE',
+    'SIG_ERB',
+    'SIG_LOGICA',
+    'SIG_ESTADO',
+    'NOM_MUNICIPIO',
+    'DES_AREA_TARIFACAO',
+]
+
 # Colunas EXATAMENTE iguais e na mesma ordem do TEMPLATE.xlsx enviado.
 TEMPLATE_COLUMNS = [
     'gNodeB Name', 'Cell Name', 'gNodeB ID', 'Cell ID', 'PCI', 'TAC',
@@ -57,7 +68,7 @@ TEMPLATE_COLUMNS = [
 # Colunas do Science que sao usadas nas regras do template.
 SCIENCE_COLUMNS = (
     '`SIG_SITE`,`SIG_LOGICA`,`SIG_ERB`,`DES_AREA_TARIFACAO`,`SIG_ESTADO`,'
-    '`NOM_MUNICIPIO`,`NUM_LATITUDE_DECIMAL`,`NUM_LONGITUDE_DECIMAL`,'
+    '`NOM_MUNICIPIO`,`NUM_TAC`,`NUM_LATITUDE_DECIMAL`,`NUM_LONGITUDE_DECIMAL`,'
     '`NUM_ALTURA`,`NUM_AZIMUTE_ANTENA`,`NUM_TILT_MECAN_ANTENA`,'
     '`DES_MODELO_ANTENA`,`STS_COBERTURA`,`[C]CGI`'
 )
@@ -295,28 +306,12 @@ def _gscn_to_narfcn(series):
     )
 
 
-def _save_duplicate_diagnostic(duplicated_df, key_column, label):
-    """Salva as linhas envolvidas em chaves duplicadas para conferencia."""
-    if duplicated_df.empty:
-        return
-
-    os.makedirs(pasta_destino_analises, exist_ok=True)
-    safe_label = re.sub(r'[^A-Za-z0-9_-]+', '_', str(label)).strip('_')
-    diagnostic_path = os.path.join(
-        pasta_destino_analises,
-        f'duplicidades_{safe_label}.xlsx'
-    )
-
-    diagnostic = duplicated_df.copy()
-    diagnostic = diagnostic.sort_values(key_column, kind='stable')
-    diagnostic.to_excel(diagnostic_path, index=False)
-    print(f'[INFO] Diagnostico de duplicidades salvo em: {diagnostic_path}')
-
-
 def _dedupe_best_row(df, key_column, label):
     """
-    Se houver duplicidade da chave de merge, salva o diagnostico e mantem
-    uma unica linha por chave: a linha com maior quantidade de campos preenchidos.
+    Se houver duplicidade da chave de merge, mantem uma unica linha por chave.
+    Como as duplicidades sao erros de cadastro com a mesma informacao, nenhum
+    arquivo de diagnostico e enviado/salvo no SharePoint. A linha mais preenchida
+    continua sendo priorizada apenas como protecao contra algum campo vazio.
     """
     if df.empty or key_column not in df.columns:
         return df
@@ -330,9 +325,8 @@ def _dedupe_best_row(df, key_column, label):
         print(
             f'[AVISO] {label}: {qtd_chaves:,} chave(s) duplicada(s), '
             f'afetando {qtd_linhas:,} linha(s). '
-            'Sera mantida a linha mais preenchida de cada chave.'
+            'Sera mantida somente uma linha por chave; nenhum diagnostico sera salvo.'
         )
-        _save_duplicate_diagnostic(duplicated, key_column, label)
 
     temp = df.copy()
 
@@ -410,8 +404,9 @@ def _build_unified_base(science, ericsson, huawei):
       Ericsson: NRCellDUId + UF (2 ultimos caracteres de NodeId)
       Huawei: NR DU Cell Name + UF (2 ultimos caracteres de Site Name)
 
-    Mantem TODAS as celulas NR ativas do Science. Uma celula antiga que nao esta
-    mais no Science ativo nao entra na saida atualizada.
+    Mantem somente as celulas NR ativas do Science que possuem casamento com
+    Ericsson ou Huawei. Uma celula antiga que nao esta mais no Science ativo, ou
+    que nao possui vendor casado, nao entra na saida atualizada.
     """
     science = _prepare_science(science)
     ericsson = _prepare_ericsson(ericsson)
@@ -439,14 +434,16 @@ def _build_unified_base(science, ericsson, huawei):
 
     matched_keys = set(matched['_merge_key']) if not matched.empty else set()
     unmatched = science[~science['_merge_key'].isin(matched_keys)].copy()
-    unmatched['_VENDOR_SOURCE'] = np.nan
 
-    unified = pd.concat([matched, unmatched], ignore_index=True, sort=False)
+    # Regra solicitada: celulas do Science sem casamento com Ericsson/Huawei
+    # nao devem fazer parte nem do Excel atualizado nem da tabela do banco.
+    unified = matched.reset_index(drop=True)
 
     print(f'[INFO] Science ativo NR: {len(science):,}')
     print(f'[INFO] Casados com Ericsson: {len(er):,}')
     print(f'[INFO] Casados com Huawei: {len(hw):,}')
-    print(f'[INFO] Sem casamento de vendor: {len(unmatched):,}')
+    print(f'[INFO] Sem casamento de vendor (EXCLUIDOS): {len(unmatched):,}')
+    print(f'[INFO] Total apos filtro de vendor: {len(unified):,}')
 
     return unified
 
@@ -466,6 +463,9 @@ def _populate_template(base):
     out['gNodeB Name'] = (sig_erb + '_' + sig_estado).where(valid_gnb_name, np.nan)
 
     out['Cell Name'] = _series(base, 'SIG_LOGICA').astype('string').str.strip()
+
+    # TAC vem diretamente do Science (NUM_TAC) e vale para Ericsson e Huawei.
+    out['TAC'] = _to_numeric(_series(base, 'NUM_TAC'))
 
     # Latitude/Longitude ficam numericos. Em Excel PT-BR, o separador decimal e exibido como virgula.
     out['Latitude'] = _to_numeric(_series(base, 'NUM_LATITUDE_DECIMAL'))
@@ -667,6 +667,52 @@ def _save_updated_excel(df):
 
 
 # ============================================================
+# BASE DO BANCO / BI
+# ============================================================
+def _build_bank_output(atualizado, unified):
+    """
+    Mantem o Excel exatamente com as colunas do TEMPLATE_COLUMNS, mas acrescenta
+    no BANCO campos auxiliares do Science para filtros e analises do BI.
+
+    Chave: gNodeB Name + Cell Name.
+    """
+    banco_df = atualizado.copy()
+    banco_df['_excel_key'] = _excel_key(banco_df)
+
+    aux = pd.DataFrame(index=unified.index)
+
+    sig_erb = _series(unified, 'SIG_ERB').astype('string').str.strip()
+    sig_estado = _series(unified, 'SIG_ESTADO').astype('string').str.strip().str.upper()
+    valid_gnb = ~(sig_erb.isna() | sig_estado.isna() | sig_erb.eq('') | sig_estado.eq(''))
+
+    aux['gNodeB Name'] = (sig_erb + '_' + sig_estado).where(valid_gnb, np.nan)
+    aux['Cell Name'] = _series(unified, 'SIG_LOGICA').astype('string').str.strip()
+
+    for col in BANCO_EXTRA_COLUMNS:
+        aux[col] = _series(unified, col)
+
+    aux['_excel_key'] = _excel_key(aux)
+    aux = aux[aux['_excel_key'].ne('')].copy()
+
+    # O Science ja foi deduplicado antes dos merges. Este drop_duplicates e apenas
+    # uma ultima protecao para garantir relacao 1:1 na inclusao dos campos do BI.
+    aux = aux.drop_duplicates(subset=['_excel_key'], keep='first')
+
+    banco_df = banco_df.merge(
+        aux[['_excel_key'] + BANCO_EXTRA_COLUMNS],
+        on='_excel_key',
+        how='left',
+        validate='one_to_one'
+    )
+
+    banco_df = banco_df.drop(columns=['_excel_key'])
+
+    # Ordem no banco: primeiro as 106 colunas oficiais do template e, depois,
+    # os campos extras usados pelo BI.
+    return banco_df.reindex(columns=TEMPLATE_COLUMNS + BANCO_EXTRA_COLUMNS)
+
+
+# ============================================================
 # EXECUCAO PRINCIPAL
 # ============================================================
 def main():
@@ -691,11 +737,17 @@ def main():
     atualizado = _merge_with_existing_excel(generated)
     _save_updated_excel(atualizado)
 
-    print('[6/6] Gravando a mesma base final no banco...')
+    print('[6/6] Gravando base enriquecida para o BI no banco...')
     database = DATABASE_SAIDA
     tabela = TABELA_SAIDA
-    c.to_sql(atualizado, database, tabela, banco)
+
+    # O Excel permanece exatamente no layout do template. No banco, alem das
+    # 106 colunas, entram SIG_SITE e os demais campos auxiliares definidos em
+    # BANCO_EXTRA_COLUMNS para facilitar filtros e analises no BI.
+    banco_df = _build_bank_output(atualizado, unified)
+    c.to_sql(banco_df, database, tabela, banco)
     print(f'[OK] Banco atualizado: {database}.{tabela}')
+    print(f'[OK] Colunas extras do BI: {", ".join(BANCO_EXTRA_COLUMNS)}')
 
     print(f'[OK] Total final de celulas: {len(atualizado):,}')
     return atualizado
