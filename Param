@@ -1,1 +1,469 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
 
+from Conntomysql import Conntomysql
+
+# ============================================================
+# CONEXÃO
+# ============================================================
+
+c = Conntomysql()
+banco = "prod"
+
+
+# ============================================================
+# 1. PARAMETERS 4G
+# ============================================================
+
+df_4g = c.read_sql(
+    database="cadastro",
+    tabela="parameters_consolidada_4g",
+    banco=banco,
+    colunas=[
+        "[PJ]ID_PMTS",
+        "DATA_ENVIO_CADASTRO"
+    ],
+    where="DATA_ENVIO_CADASTRO IS NOT NULL"
+)
+
+df_4g["TECNOLOGIA"] = "4G"
+
+
+# ============================================================
+# 2. PARAMETERS 5G
+# ============================================================
+
+df_5g = c.read_sql(
+    database="cadastro",
+    tabela="parameters_consolidada_5g",
+    banco=banco,
+    colunas=[
+        "[PJ]ID_PMTS",
+        "DATA_ENVIO_CADASTRO"
+    ],
+    where="DATA_ENVIO_CADASTRO IS NOT NULL"
+)
+
+df_5g["TECNOLOGIA"] = "5G"
+
+
+# ============================================================
+# 3. JUNTA 4G + 5G
+# ============================================================
+
+df_parameters = pd.concat(
+    [df_4g, df_5g],
+    ignore_index=True
+)
+
+df_parameters = df_parameters.rename(
+    columns={
+        "[PJ]ID_PMTS": "ID_PMTS"
+    }
+)
+
+
+# ============================================================
+# 4. TRATAMENTO
+# ============================================================
+
+df_parameters["ID_PMTS"] = (
+    df_parameters["ID_PMTS"]
+    .astype(str)
+    .str.strip()
+)
+
+df_parameters["DATA_ENVIO_CADASTRO"] = pd.to_datetime(
+    df_parameters["DATA_ENVIO_CADASTRO"],
+    errors="coerce"
+)
+
+df_parameters = df_parameters.dropna(
+    subset=[
+        "ID_PMTS",
+        "DATA_ENVIO_CADASTRO"
+    ]
+)
+
+
+# ============================================================
+# 5. PRIMEIRA OCORRÊNCIA DO ID PMTS
+#
+# Exemplo:
+#
+# PMTS X:
+# 4G -> 20/08
+# 4G -> 25/08
+# 5G -> 18/08
+#
+# Será utilizado 18/08.
+# ============================================================
+
+df_parameters = (
+    df_parameters
+    .sort_values("DATA_ENVIO_CADASTRO")
+    .drop_duplicates(
+        subset=["ID_PMTS"],
+        keep="first"
+    )
+    .reset_index(drop=True)
+)
+
+
+# ============================================================
+# 6. PMTS RF
+#
+# SOMENTE OBRAS LÓGICAS
+# ============================================================
+
+df_pmts = c.read_sql(
+    database="movel_rf",
+    tabela="pmts_rf",
+    banco=banco,
+    colunas=[
+        "UID_IDPMTS",
+        "PMO_ESCOPO_META",
+        "INTEGRADOR_ATIVACAO_R"
+    ],
+    where="PMO_ESCOPO_META = 'LÓGICA'"
+)
+
+
+# ============================================================
+# 7. TRATAMENTO PMTS
+# ============================================================
+
+df_pmts = df_pmts.rename(
+    columns={
+        "UID_IDPMTS": "ID_PMTS"
+    }
+)
+
+df_pmts["ID_PMTS"] = (
+    df_pmts["ID_PMTS"]
+    .astype(str)
+    .str.strip()
+)
+
+df_pmts["INTEGRADOR_ATIVACAO_R"] = pd.to_datetime(
+    df_pmts["INTEGRADOR_ATIVACAO_R"],
+    errors="coerce"
+)
+
+df_pmts = df_pmts.dropna(
+    subset=[
+        "ID_PMTS",
+        "INTEGRADOR_ATIVACAO_R"
+    ]
+)
+
+
+# ============================================================
+# 8. GARANTE UMA LINHA POR ID PMTS
+# ============================================================
+
+df_pmts = (
+    df_pmts
+    .sort_values("INTEGRADOR_ATIVACAO_R")
+    .drop_duplicates(
+        subset=["ID_PMTS"],
+        keep="first"
+    )
+)
+
+
+# ============================================================
+# 9. JUNTA PARAMETERS COM PMTS
+# ============================================================
+
+df_final = df_parameters.merge(
+    df_pmts,
+    on="ID_PMTS",
+    how="inner"
+)
+
+
+# ============================================================
+# 10. CALCULA A DISTÂNCIA
+#
+# POSITIVO:
+# envio aconteceu antes da ativação
+#
+# NEGATIVO:
+# ativação aconteceu antes do envio
+# ============================================================
+
+df_final["DIAS_ENVIO_ATE_ATIVACAO"] = (
+    df_final["INTEGRADOR_ATIVACAO_R"]
+    - df_final["DATA_ENVIO_CADASTRO"]
+).dt.total_seconds() / 86400
+
+df_final["DIAS_ENVIO_ATE_ATIVACAO"] = (
+    df_final["DIAS_ENVIO_ATE_ATIVACAO"]
+    .round(2)
+)
+
+
+# ============================================================
+# 11. INFORMAÇÕES GERAIS
+# ============================================================
+
+print("=" * 60)
+print("RESULTADO GERAL")
+print("=" * 60)
+
+print(
+    f"Quantidade de obras lógicas encontradas: "
+    f"{len(df_final)}"
+)
+
+print(
+    f"Ativação antes do envio: "
+    f"{(df_final['DIAS_ENVIO_ATE_ATIVACAO'] < 0).sum()}"
+)
+
+print(
+    f"Ativação no mesmo momento/dia: "
+    f"{(df_final['DIAS_ENVIO_ATE_ATIVACAO'] == 0).sum()}"
+)
+
+print(
+    f"Ativação depois do envio: "
+    f"{(df_final['DIAS_ENVIO_ATE_ATIVACAO'] > 0).sum()}"
+)
+
+print("\nResumo estatístico:")
+
+print(
+    df_final["DIAS_ENVIO_ATE_ATIVACAO"]
+    .describe(
+        percentiles=[
+            0.25,
+            0.50,
+            0.75,
+            0.90
+        ]
+    )
+)
+
+
+# ============================================================
+# 12. GRÁFICO 1
+# DISTRIBUIÇÃO COMPLETA
+# INCLUSIVE VALORES NEGATIVOS
+# ============================================================
+
+plt.figure(figsize=(13, 6))
+
+plt.hist(
+    df_final["DIAS_ENVIO_ATE_ATIVACAO"],
+    bins=40,
+    edgecolor="black"
+)
+
+plt.axvline(
+    0,
+    linestyle="--",
+    linewidth=2,
+    label="Ativação = envio"
+)
+
+plt.xlabel(
+    "Dias entre primeiro envio do cadastro e ativação"
+)
+
+plt.ylabel(
+    "Quantidade de obras"
+)
+
+plt.title(
+    "Obras lógicas - distância entre envio do cadastro e ativação"
+)
+
+plt.legend()
+
+plt.grid(
+    axis="y",
+    alpha=0.3
+)
+
+plt.tight_layout()
+
+plt.show()
+
+
+# ============================================================
+# 13. SOMENTE VALORES POSITIVOS
+# ============================================================
+
+df_positivo = df_final[
+    df_final["DIAS_ENVIO_ATE_ATIVACAO"] > 0
+].copy()
+
+
+# ============================================================
+# 14. CRIA FAIXAS DE 5 EM 5 DIAS
+#
+# 0-5
+# 5-10
+# 10-15
+# 15-20
+# ...
+# ============================================================
+
+if len(df_positivo) > 0:
+
+    max_dias = (
+        np.ceil(
+            df_positivo[
+                "DIAS_ENVIO_ATE_ATIVACAO"
+            ].max() / 5
+        ) * 5
+    )
+
+    bins = np.arange(
+        0,
+        max_dias + 5,
+        5
+    )
+
+    labels = [
+        f"{int(bins[i])}-{int(bins[i + 1])}"
+        for i in range(len(bins) - 1)
+    ]
+
+    df_positivo["FAIXA_DIAS"] = pd.cut(
+        df_positivo[
+            "DIAS_ENVIO_ATE_ATIVACAO"
+        ],
+        bins=bins,
+        labels=labels,
+
+        # 5 entra em 5-10
+        # 10 entra em 10-15
+        right=False
+    )
+
+
+    # ========================================================
+    # 15. CONTAGEM POR FAIXA
+    # ========================================================
+
+    contagem_faixas = (
+        df_positivo["FAIXA_DIAS"]
+        .value_counts(sort=False)
+    )
+
+
+    # ========================================================
+    # 16. GRÁFICO 2
+    # POSITIVOS DE 5 EM 5 DIAS
+    # ========================================================
+
+    plt.figure(figsize=(15, 7))
+
+    ax = contagem_faixas.plot(
+        kind="bar"
+    )
+
+    plt.xlabel(
+        "Dias entre primeiro envio e ativação"
+    )
+
+    plt.ylabel(
+        "Quantidade de obras"
+    )
+
+    plt.title(
+        "Obras lógicas - intervalo entre envio e ativação "
+        "(faixas de 5 dias)"
+    )
+
+    plt.xticks(
+        rotation=45,
+        ha="right"
+    )
+
+    plt.grid(
+        axis="y",
+        alpha=0.3
+    )
+
+
+    # ========================================================
+    # 17. COLOCA QUANTIDADE EM CIMA DAS BARRAS
+    # ========================================================
+
+    for container in ax.containers:
+        ax.bar_label(
+            container,
+            fmt="%d",
+            padding=3
+        )
+
+
+    plt.tight_layout()
+
+    plt.show()
+
+
+    # ========================================================
+    # 18. TABELA DAS FAIXAS
+    # ========================================================
+
+    tabela_faixas = (
+        contagem_faixas
+        .reset_index()
+    )
+
+    tabela_faixas.columns = [
+        "FAIXA_DIAS",
+        "QUANTIDADE"
+    ]
+
+    print("\n")
+    print("=" * 60)
+    print("QUANTIDADE DE OBRAS POR FAIXA")
+    print("=" * 60)
+
+    print(
+        tabela_faixas.to_string(
+            index=False
+        )
+    )
+
+else:
+
+    print(
+        "\nNão foram encontrados valores positivos."
+    )
+
+
+# ============================================================
+# 19. MOSTRA BASE FINAL
+# ============================================================
+
+df_final = df_final.sort_values(
+    "DIAS_ENVIO_ATE_ATIVACAO"
+)
+
+print("\n")
+print("=" * 60)
+print("BASE FINAL")
+print("=" * 60)
+
+print(
+    df_final[
+        [
+            "ID_PMTS",
+            "TECNOLOGIA",
+            "DATA_ENVIO_CADASTRO",
+            "INTEGRADOR_ATIVACAO_R",
+            "PMO_ESCOPO_META",
+            "DIAS_ENVIO_ATE_ATIVACAO"
+        ]
+    ].to_string(
+        index=False
+    )
+)
