@@ -708,14 +708,16 @@ def _save_updated_excel(df):
 # ============================================================
 # BASE DO BANCO / BI
 # ============================================================
-def _build_bank_output(atualizado, unified):
+def _build_bank_output(template_completo, unified):
     """
-    Mantem o Excel exatamente com as colunas do TEMPLATE_COLUMNS, mas acrescenta
-    no BANCO campos auxiliares do Science para filtros e analises do BI.
+    Monta a base COMPLETA do banco/BI a partir de todas as celulas atuais que
+    possuem casamento com Ericsson/Huawei, independentemente de existirem no
+    Excel antigo. O filtro de intersecao com o Excel e aplicado SOMENTE ao
+    arquivo _atualizado.
 
     Chave: gNodeB Name + Cell Name.
     """
-    banco_df = atualizado.copy()
+    banco_df = template_completo.copy()
     banco_df['_excel_key'] = _excel_key(banco_df)
 
     aux = pd.DataFrame(index=unified.index)
@@ -780,15 +782,19 @@ def main():
     database = DATABASE_SAIDA
     tabela = TABELA_SAIDA
 
-    # O Excel permanece exatamente no layout do template. No banco, alem das
-    # 106 colunas, entram SIG_SITE e os demais campos auxiliares definidos em
-    # BANCO_EXTRA_COLUMNS para facilitar filtros e analises no BI.
-    banco_df = _build_bank_output(atualizado, unified)
+    # IMPORTANTE:
+    # - Excel: somente as celulas que ja existiam no arquivo antigo (intersecao).
+    # - Banco/BI: TODAS as celulas atuais com vendor casado, sem aplicar o filtro
+    #   do Excel antigo.
+    # Alem das 106 colunas do template, o banco recebe os campos auxiliares
+    # definidos em BANCO_EXTRA_COLUMNS.
+    banco_df = _build_bank_output(generated, unified)
     c.to_sql(banco_df, database, tabela, banco)
     print(f'[OK] Banco atualizado: {database}.{tabela}')
     print(f'[OK] Colunas extras do BI: {", ".join(BANCO_EXTRA_COLUMNS)}')
 
-    print(f'[OK] Total final de celulas: {len(atualizado):,}')
+    print(f'[OK] Total no Excel _atualizado: {len(atualizado):,}')
+    print(f'[OK] Total enviado ao banco/BI: {len(banco_df):,}')
     return atualizado
 
 
