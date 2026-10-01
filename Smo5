@@ -70,7 +70,7 @@ SCIENCE_COLUMNS = (
     '`SIG_SITE`,`SIG_LOGICA`,`SIG_ERB`,`DES_AREA_TARIFACAO`,`SIG_ESTADO`,'
     '`NOM_MUNICIPIO`,`NUM_TAC`,`NUM_LATITUDE_DECIMAL`,`NUM_LONGITUDE_DECIMAL`,'
     '`NUM_ALTURA`,`NUM_AZIMUTE_ANTENA`,`NUM_TILT_MECAN_ANTENA`,'
-    '`DES_MODELO_ANTENA`,`STS_COBERTURA`,`[C]CGI`'
+    '`DES_MODELO_ANTENA`,`STS_COBERTURA`,`CGI`'
 )
 
 
@@ -136,12 +136,22 @@ def _make_merge_key(cell, uf):
 
 
 def _make_city(row):
-    # Regra solicitada: SIG_ESTADO + NOM_MUNICIPIO.
+    # Regra solicitada: prefixo regional + NOM_MUNICIPIO.
+    # Para SP, a City deve acompanhar a mesma classificacao de Region:
+    #   SPC_DIADEMA, SPI_CAMPINAS, etc., em vez de SP_DIADEMA/SP_CAMPINAS.
+    # Para os demais estados, mantem o prefixo da UF.
     uf = _normalize(row.get('SIG_ESTADO'))
     cidade = _normalize(row.get('NOM_MUNICIPIO'))
-    if uf and cidade:
-        return f'{uf}_{cidade}'
-    return uf or cidade
+
+    prefixo = uf
+    if uf == 'SP':
+        regiao_sp = _build_region(row.get('SIG_ESTADO'), row.get('DES_AREA_TARIFACAO'))
+        if regiao_sp in {'SPC', 'SPI'}:
+            prefixo = regiao_sp
+
+    if prefixo and cidade:
+        return f'{prefixo}_{cidade}'
+    return prefixo or cidade
 
 
 def _build_region(state, area):
@@ -486,7 +496,7 @@ def _populate_template(base):
         'SECTORIZE'
     )
 
-    cgi = _series(base, '[C]CGI').astype('string')
+    cgi = _series(base, 'CGI').astype('string').str.strip()
     cgi_parts = cgi.str.split('-', expand=True)
     if cgi_parts.shape[1] >= 1:
         out['MCC'] = cgi_parts[0]
@@ -603,10 +613,15 @@ def _merge_with_existing_excel(current_df):
     """
     Usa gNodeB Name + Cell Name como chave.
 
-    - O conjunto de linhas da saida e o Science NR ativo atual.
-    - Linhas que existiam no Excel antigo mas nao existem mais no Science ativo sao removidas.
-    - Valores recalculados/preenchidos pela base nova atualizam o Excel.
-    - Se uma coluna nova vier vazia, preserva o valor antigo daquela celula.
+    REGRA PRINCIPAL:
+    - Somente celulas que JA EXISTIAM no EngineeringParameters_0.xlsx podem
+      aparecer no arquivo _atualizado.
+    - Celulas novas encontradas no Science/vendor NAO sao adicionadas ao Excel.
+    - Entre as celulas antigas, permanecem apenas as que continuam no Science NR
+      ativo e possuem casamento com Ericsson/Huawei.
+    - Valores atuais preenchidos atualizam o Excel. Se o valor atual vier vazio,
+      preserva o valor antigo daquela mesma celula.
+    - A ordem das linhas segue, tanto quanto possivel, a ordem do Excel antigo.
     - O arquivo original nunca e sobrescrito.
     """
     if not os.path.exists(arquivo_original):
@@ -625,19 +640,36 @@ def _merge_with_existing_excel(current_df):
     current = _dedupe_best_row(current, '_excel_key', 'BASE_ATUAL_GERADA')
     old_df = _dedupe_best_row(old_df, '_excel_key', 'EXCEL_ANTIGO')
 
-    merged = current.merge(
-        old_df,
+    # Guarda a ordem original do Excel para manter o arquivo familiar ao usuario.
+    old_df['_old_order'] = np.arange(len(old_df))
+
+    # INNER JOIN com o Excel antigo do lado esquerdo:
+    #   1) impede inclusao de qualquer celula nova;
+    #   2) remove celulas antigas que deixaram de existir na base atual ativa/vendor.
+    merged = old_df.merge(
+        current,
         on='_excel_key',
-        how='left',
-        suffixes=('', '__old')
+        how='inner',
+        suffixes=('__old', '')
     )
 
-    # gNodeB Name e Cell Name sempre ficam com os valores atuais.
+    # gNodeB Name e Cell Name permanecem com os valores atuais, mas como a chave
+    # e a mesma, isso nao cria nenhuma nova celula.
     key_columns = {'gNodeB Name', 'Cell Name'}
 
     for col in TEMPLATE_COLUMNS:
         old_col = f'{col}__old'
-        if col in key_columns or old_col not in merged.columns:
+
+        # Para as colunas de chave, usa a versao atual; se por algum motivo estiver
+        # vazia, recupera a versao antiga.
+        if col in key_columns:
+            if old_col in merged.columns and col in merged.columns:
+                atual = merged[col].astype(object)
+                antigo = merged[old_col].astype(object)
+                merged[col] = atual.where(~_blank_mask(atual), antigo)
+            continue
+
+        if col not in merged.columns or old_col not in merged.columns:
             continue
 
         # Pandas recente pode criar colunas com dtype string estrito. O Excel antigo
@@ -650,7 +682,14 @@ def _merge_with_existing_excel(current_df):
         # Valor atual preenchido tem prioridade. Se estiver vazio, preserva o antigo.
         merged[col] = atual.where(~blank, antigo)
 
-    result = merged.reindex(columns=TEMPLATE_COLUMNS)
+    merged = merged.sort_values('_old_order')
+    result = merged.reindex(columns=TEMPLATE_COLUMNS).reset_index(drop=True)
+
+    print(f'[INFO] Celulas existentes no Excel antigo: {len(old_df):,}')
+    print(f'[INFO] Celulas atuais elegiveis antes do filtro do Excel: {len(current):,}')
+    print(f'[INFO] Celulas mantidas no _atualizado (intersecao): {len(result):,}')
+    print(f'[INFO] Celulas novas ignoradas: {len(set(current["_excel_key"]) - set(old_df["_excel_key"])):,}')
+
     return result
 
 
@@ -733,7 +772,7 @@ def main():
     assert _gscn_to_narfcn_value(5287) == 422930, 'Falha na conversao GSCN 5287.'
     assert _gscn_to_narfcn_value(7811) == 629952, 'Falha na conversao GSCN 7811.'
 
-    print('[5/6] Atualizando dados com o Excel antigo, sem altera-lo...')
+    print('[5/6] Atualizando somente as celulas que ja existiam no Excel antigo...')
     atualizado = _merge_with_existing_excel(generated)
     _save_updated_excel(atualizado)
 
