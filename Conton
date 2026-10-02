@@ -1,53 +1,109 @@
-import pandas as pd
+"""
+MEGA BRAIN - Lineage atual de scripts
+
+Objetivo
+--------
+Ler controle_gestao.log_atividade_scripts usando a biblioteca interna Conntomysql,
+considerar somente uma janela recente configuravel (padrao: 30 dias) e gerar um
+snapshot atual das relacoes entre scripts e tabelas.
+
+Saidas gravadas em controle_gestao:
+- lineage_scripts_atual          -> relacao canonica atual (Leitura + Escrita)
+- lineage_produtores_scripts     -> todos os scripts que escrevem cada tabela
+- lineage_consumidores_scripts   -> todos os scripts que leem cada tabela
+- lineage_produtor_principal     -> resumo de 1 produtor mais recente por tabela
+
+Importante
+----------
+A tabela canonica e lineage_scripts_atual. O produtor principal e apenas um resumo.
+Se uma tabela tiver 3 scripts de escrita, os 3 permanecem em lineage_produtores_scripts.
+"""
+
+import datetime as dt
 import unicodedata
+import pandas as pd
 
 from Conntomysql import Conntomysql
 
 
 # ============================================================
-# CONFIGURAÇÕES
+# CONFIGURACOES
 # ============================================================
 
 c = Conntomysql()
-banco = "prod"
+BANCO = "prod"
 
 DATABASE_LOG = "controle_gestao"
 TABELA_LOG = "log_atividade_scripts"
 
 DATABASE_SAIDA = "controle_gestao"
-TABELA_SAIDA = "lineage_produtor_principal"
+TABELA_ATUAL = "lineage_scripts_atual"
+TABELA_PRODUTORES = "lineage_produtores_scripts"
+TABELA_CONSUMIDORES = "lineage_consumidores_scripts"
+TABELA_PRODUTOR_PRINCIPAL = "lineage_produtor_principal"
 
-# Opcional: guarda também todos os scripts que já aparecem
-# atualmente como produtores de cada tabela.
-TABELA_SAIDA_TODOS = "lineage_produtores_scripts"
+# Janela operacional do lineage atual.
+# Se necessario, altere apenas este valor.
+DIAS_LINEAGE = 30
 
 
 # ============================================================
-# FUNÇÕES
+# FUNCOES AUXILIARES
 # ============================================================
 
 def normalizar(valor):
-    """
-    Normalização para permitir o casamento:
-        Fabric source_database <-> log DATABASE
-        Fabric source_table    <-> log TABELA
-    """
+    """Normaliza texto para chave de relacionamento."""
     if pd.isna(valor):
         return None
 
     valor = str(valor).strip()
-
     valor = unicodedata.normalize("NFKD", valor)
     valor = "".join(
-        c for c in valor
-        if not unicodedata.combining(c)
+        caractere
+        for caractere in valor
+        if not unicodedata.combining(caractere)
     )
 
     return valor.lower()
 
 
+def tipo_normalizado(valor):
+    """Padroniza Leitura/Escrita sem depender de caixa/acentos."""
+    valor = normalizar(valor)
+
+    if valor == "escrita":
+        return "ESCRITA"
+    if valor == "leitura":
+        return "LEITURA"
+
+    return None
+
+
+def salvar_replace(df, tabela):
+    """Grava snapshot atual. Historico permanece no log original."""
+    c.to_sql(
+        df,
+        DATABASE_SAIDA,
+        tabela,
+        BANCO,
+        existente="replace",
+    )
+    print(f"[OK] {DATABASE_SAIDA}.{tabela}: {len(df):,} linhas")
+
+
 # ============================================================
-# 1. LER SOMENTE EVENTOS DE ESCRITA
+# 1. DATA LIMITE
+# ============================================================
+
+data_limite = (
+    dt.datetime.now() - dt.timedelta(days=DIAS_LINEAGE)
+).strftime("%Y-%m-%d %H:%M:%S")
+
+print(f"Importando {TABELA_LOG} desde {data_limite}")
+
+
+# ============================================================
+# 2. LEITURA DO LOG
 # ============================================================
 
 COLUNAS = """
@@ -60,39 +116,55 @@ COLUNAS = """
 `DIA_EXECUCAO`
 """
 
+# O filtro e executado no banco, evitando trazer todo o historico desde 2024.
+filtro = f"""
+(
+    `DIA_EXECUCAO` >= '{data_limite}'
+    AND `TIPO` IN ('Leitura', 'Escrita')
+)
+"""
+
 df = c.read_sql(
     DATABASE_LOG,
     TABELA_LOG,
-    banco,
+    BANCO,
     colunas=COLUNAS,
-    where="(`TIPO` = 'Escrita')"
+    where=filtro,
 )
 
-print(f"Registros de escrita encontrados: {len(df):,}")
+print(f"Registros recebidos: {len(df):,}")
+
+if df.empty:
+    raise RuntimeError(
+        "Nenhum registro encontrado na janela configurada. "
+        "Aumente DIAS_LINEAGE ou valide DIA_EXECUCAO/TIPO."
+    )
 
 
 # ============================================================
-# 2. LIMPEZA
+# 3. NORMALIZACAO
 # ============================================================
 
 df["DIA_EXECUCAO"] = pd.to_datetime(
     df["DIA_EXECUCAO"],
-    errors="coerce"
+    errors="coerce",
 )
 
 df["DATABASE_NORM"] = df["DATABASE"].apply(normalizar)
 df["TABELA_NORM"] = df["TABELA"].apply(normalizar)
 df["SCRIPT_NORM"] = df["SCRIPT"].apply(normalizar)
+df["TIPO_NORM"] = df["TIPO"].apply(tipo_normalizado)
 
-# Elimina registros que não servem para lineage
+# Mantem apenas relacoes utilizaveis.
 df = df[
     df["DATABASE_NORM"].notna()
     & df["TABELA_NORM"].notna()
     & df["SCRIPT_NORM"].notna()
+    & df["TIPO_NORM"].notna()
+    & df["DIA_EXECUCAO"].notna()
 ].copy()
 
-
-# Chave que posteriormente será usada com o Fabric
+# Chave que sera compartilhada com o catalogo Fabric.
 df["CHAVE_FONTE"] = (
     df["DATABASE_NORM"]
     + "|"
@@ -101,53 +173,84 @@ df["CHAVE_FONTE"] = (
 
 
 # ============================================================
-# 3. ÚLTIMA EVIDÊNCIA DE CADA SCRIPT ESCREVENDO CADA TABELA
+# 4. ULTIMA EVIDENCIA DE CADA RELACAO
+# ============================================================
+#
+# Uma relacao e definida por:
+#   DATABASE + TABELA + SCRIPT + TIPO
+#
+# Se SCIENCE.py leu a mesma tabela 500 vezes no mes, fica somente
+# a evidencia mais recente dessa relacao.
 # ============================================================
 
-df = df.sort_values(
-    "DIA_EXECUCAO",
-    ascending=False
-)
+df = df.sort_values("DIA_EXECUCAO", ascending=False)
 
-# Exemplo:
-#
-# movel_rf | pmts_ran | script_a.py
-#
-# Se esse script apareceu 500 vezes no log,
-# fica somente a execução mais recente.
-df_produtores = (
-    df
-    .drop_duplicates(
+df_atual = (
+    df.drop_duplicates(
         subset=[
             "DATABASE_NORM",
             "TABELA_NORM",
-            "SCRIPT_NORM"
+            "SCRIPT_NORM",
+            "TIPO_NORM",
         ],
-        keep="first"
+        keep="first",
     )
     .copy()
 )
 
+# Dias desde a ultima evidencia. Util para freshness futura.
+agora = pd.Timestamp.now()
+df_atual["DIAS_DESDE_ULTIMA_EXECUCAO"] = (
+    agora - df_atual["DIA_EXECUCAO"]
+).dt.days
+
+# Nomes mais claros para consumo posterior.
+df_atual = df_atual.rename(
+    columns={
+        "DIA_EXECUCAO": "ULTIMA_EXECUCAO",
+        "COLUNAS": "COLUNAS_ULTIMA_EXECUCAO",
+    }
+)
+
+colunas_atual = [
+    "CHAVE_FONTE",
+    "DATABASE",
+    "TABELA",
+    "DATABASE_NORM",
+    "TABELA_NORM",
+    "SCRIPT",
+    "SCRIPT_NORM",
+    "TIPO",
+    "TIPO_NORM",
+    "ULTIMA_EXECUCAO",
+    "DIAS_DESDE_ULTIMA_EXECUCAO",
+    "COLUNAS_ULTIMA_EXECUCAO",
+    "BANCO",
+]
+
+df_atual = df_atual[colunas_atual].reset_index(drop=True)
+
 
 # ============================================================
-# 4. QUANTOS SCRIPTS ESCREVEM CADA TABELA?
+# 5. PRODUTORES (ESCRITA)
 # ============================================================
+
+df_produtores = df_atual[
+    df_atual["TIPO_NORM"] == "ESCRITA"
+].copy()
 
 qtd_produtores = (
-    df_produtores
-    .groupby(
+    df_produtores.groupby(
         ["DATABASE_NORM", "TABELA_NORM"],
-        as_index=False
+        as_index=False,
     )
-    .agg(
-        QTD_PRODUTORES=("SCRIPT", "nunique")
-    )
+    .agg(QTD_PRODUTORES=("SCRIPT_NORM", "nunique"))
 )
 
 df_produtores = df_produtores.merge(
     qtd_produtores,
     on=["DATABASE_NORM", "TABELA_NORM"],
-    how="left"
+    how="left",
 )
 
 df_produtores["MULTIPLOS_PRODUTORES"] = (
@@ -156,122 +259,132 @@ df_produtores["MULTIPLOS_PRODUTORES"] = (
 
 
 # ============================================================
-# 5. PRODUTOR PRINCIPAL
-# ============================================================
-#
-# Para a tabela que vamos relacionar ao Power BI,
-# queremos UMA linha por DATABASE + TABELA.
-#
-# Se houver mais de um script escritor, usamos aquele
-# que foi observado escrevendo mais recentemente.
-#
-# NÃO apagamos a informação dos outros escritores:
-# ela fica em lineage_produtores_scripts.
+# 6. CONSUMIDORES (LEITURA)
 # ============================================================
 
-df_principal = (
-    df_produtores
-    .sort_values("DIA_EXECUCAO", ascending=False)
-    .drop_duplicates(
-        subset=["DATABASE_NORM", "TABELA_NORM"],
-        keep="first"
+df_consumidores = df_atual[
+    df_atual["TIPO_NORM"] == "LEITURA"
+].copy()
+
+qtd_consumidores = (
+    df_consumidores.groupby(
+        ["DATABASE_NORM", "TABELA_NORM"],
+        as_index=False,
     )
-    .copy()
+    .agg(QTD_CONSUMIDORES=("SCRIPT_NORM", "nunique"))
 )
 
-
-# Renomeia para ficar fácil de entender no BI
-df_principal = df_principal.rename(
-    columns={
-        "SCRIPT": "SCRIPT_GERADOR",
-        "DIA_EXECUCAO": "ULTIMA_EXECUCAO_GERADOR",
-        "COLUNAS": "COLUNAS_ULTIMA_ESCRITA"
-    }
+df_consumidores = df_consumidores.merge(
+    qtd_consumidores,
+    on=["DATABASE_NORM", "TABELA_NORM"],
+    how="left",
 )
 
-
-# ============================================================
-# 6. COLUNAS FINAIS
-# ============================================================
-
-df_principal = df_principal[
-    [
-        "CHAVE_FONTE",
-        "DATABASE",
-        "TABELA",
-        "DATABASE_NORM",
-        "TABELA_NORM",
-        "SCRIPT_GERADOR",
-        "ULTIMA_EXECUCAO_GERADOR",
-        "COLUNAS_ULTIMA_ESCRITA",
-        "BANCO",
-        "QTD_PRODUTORES",
-        "MULTIPLOS_PRODUTORES"
-    ]
-].reset_index(drop=True)
-
-
-df_produtores_saida = df_produtores[
-    [
-        "CHAVE_FONTE",
-        "DATABASE",
-        "TABELA",
-        "DATABASE_NORM",
-        "TABELA_NORM",
-        "SCRIPT",
-        "DIA_EXECUCAO",
-        "COLUNAS",
-        "BANCO",
-        "QTD_PRODUTORES",
-        "MULTIPLOS_PRODUTORES"
-    ]
-].reset_index(drop=True)
-
-
-# ============================================================
-# 7. MOSTRAR RESULTADO
-# ============================================================
-
-print("\nExemplo - produtor principal:")
-print(df_principal.head(20).to_string(index=False))
-
-print(
-    "\nTabelas com mais de um possível produtor:",
-    int(df_principal["MULTIPLOS_PRODUTORES"].sum())
+df_consumidores["MULTIPLOS_CONSUMIDORES"] = (
+    df_consumidores["QTD_CONSUMIDORES"] > 1
 )
 
 
 # ============================================================
-# 8. SALVAR NO BANCO
+# 7. PRODUTOR PRINCIPAL - SOMENTE RESUMO
 # ============================================================
 #
-# Aqui eu recomendo REPLACE e não APPEND.
-#
-# Motivo:
-# log_atividade_scripts JÁ É o histórico.
-# Esta tabela representa o estado atual do lineage.
+# IMPORTANTE:
+# Esta tabela nao substitui lineage_produtores_scripts.
+# Se pmts_rf tiver 3 escritores, os 3 continuam preservados na tabela detalhada.
+# O principal e apenas o escritor observado mais recentemente.
 # ============================================================
 
-c.to_sql(
-    df_principal,
-    DATABASE_SAIDA,
-    TABELA_SAIDA,
-    banco,
-    existente="replace"
-)
+if not df_produtores.empty:
+    df_produtor_principal = (
+        df_produtores
+        .sort_values("ULTIMA_EXECUCAO", ascending=False)
+        .drop_duplicates(
+            subset=["DATABASE_NORM", "TABELA_NORM"],
+            keep="first",
+        )
+        .copy()
+    )
 
-c.to_sql(
-    df_produtores_saida,
-    DATABASE_SAIDA,
-    TABELA_SAIDA_TODOS,
-    banco,
-    existente="replace"
-)
+    df_produtor_principal = df_produtor_principal.rename(
+        columns={
+            "SCRIPT": "SCRIPT_GERADOR",
+            "SCRIPT_NORM": "SCRIPT_GERADOR_NORM",
+            "ULTIMA_EXECUCAO": "ULTIMA_EXECUCAO_GERADOR",
+            "COLUNAS_ULTIMA_EXECUCAO": "COLUNAS_ULTIMA_ESCRITA",
+        }
+    )
 
-print(
-    f"\n[OK] {DATABASE_SAIDA}.{TABELA_SAIDA} criada."
-)
+    df_produtor_principal = df_produtor_principal[
+        [
+            "CHAVE_FONTE",
+            "DATABASE",
+            "TABELA",
+            "DATABASE_NORM",
+            "TABELA_NORM",
+            "SCRIPT_GERADOR",
+            "SCRIPT_GERADOR_NORM",
+            "ULTIMA_EXECUCAO_GERADOR",
+            "DIAS_DESDE_ULTIMA_EXECUCAO",
+            "COLUNAS_ULTIMA_ESCRITA",
+            "BANCO",
+            "QTD_PRODUTORES",
+            "MULTIPLOS_PRODUTORES",
+        ]
+    ].reset_index(drop=True)
+else:
+    # Mantem schema previsivel mesmo sem produtores na janela.
+    df_produtor_principal = pd.DataFrame(
+        columns=[
+            "CHAVE_FONTE",
+            "DATABASE",
+            "TABELA",
+            "DATABASE_NORM",
+            "TABELA_NORM",
+            "SCRIPT_GERADOR",
+            "SCRIPT_GERADOR_NORM",
+            "ULTIMA_EXECUCAO_GERADOR",
+            "DIAS_DESDE_ULTIMA_EXECUCAO",
+            "COLUNAS_ULTIMA_ESCRITA",
+            "BANCO",
+            "QTD_PRODUTORES",
+            "MULTIPLOS_PRODUTORES",
+        ]
+    )
 
-print(
-    f"[OK] {DATABASE_SAIDA}.{TABELA_SAIDA_TODOS} criada."
-)
+
+# ============================================================
+# 8. RESUMO DE VALIDACAO
+# ============================================================
+
+print("\n===== RESUMO =====")
+print(f"Relacoes atuais: {len(df_atual):,}")
+print(f"Produtores:       {len(df_produtores):,}")
+print(f"Consumidores:     {len(df_consumidores):,}")
+print(f"Fontes c/ >1 produtor: {int(df_produtores['MULTIPLOS_PRODUTORES'].sum()) if not df_produtores.empty else 0:,}")
+
+if not df_produtores.empty:
+    print("\nExemplo de fontes com multiplos produtores:")
+    exemplo = (
+        df_produtores[df_produtores["MULTIPLOS_PRODUTORES"]]
+        [["DATABASE", "TABELA", "SCRIPT", "ULTIMA_EXECUCAO", "QTD_PRODUTORES"]]
+        .sort_values(["DATABASE", "TABELA", "ULTIMA_EXECUCAO"], ascending=[True, True, False])
+        .head(20)
+    )
+    print(exemplo.to_string(index=False))
+
+
+# ============================================================
+# 9. GRAVACAO
+# ============================================================
+#
+# Usa replace porque essas tabelas representam o estado atual.
+# O historico verdadeiro continua em log_atividade_scripts.
+# ============================================================
+
+salvar_replace(df_atual, TABELA_ATUAL)
+salvar_replace(df_produtores, TABELA_PRODUTORES)
+salvar_replace(df_consumidores, TABELA_CONSUMIDORES)
+salvar_replace(df_produtor_principal, TABELA_PRODUTOR_PRINCIPAL)
+
+print("\n[FINALIZADO] Snapshot de lineage atualizado com sucesso.")
