@@ -1,9 +1,3 @@
-# ============================================================
-# TABELA ENXUTA PARA O MODELO SEMÂNTICO / POWER BI
-# Não executa novamente o scanner.
-# Lê diretamente a tabela já salva no Lakehouse.
-# ============================================================
-
 from pyspark.sql import functions as F
 
 df_lineage_bi = (
@@ -18,12 +12,23 @@ df_lineage_bi = (
         "partition_name",
         "source_table_norm"
     )
+    .withColumn(
+        "source_database_norm",
+        F.lower(F.trim(F.col("source_database_final")))
+    )
+    .withColumn(
+        "CHAVE_FONTE",
+        F.concat_ws(
+            "|",
+            F.col("source_database_norm"),
+            F.col("source_table_norm")
+        )
+    )
     .dropDuplicates()
 )
 
 display(df_lineage_bi)
 
-# Salva uma tabela nova e limpa
 (
     df_lineage_bi.write
     .format("delta")
