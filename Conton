@@ -1,0 +1,277 @@
+import pandas as pd
+import unicodedata
+
+from Conntomysql import Conntomysql
+
+
+# ============================================================
+# CONFIGURAÇÕES
+# ============================================================
+
+c = Conntomysql()
+banco = "prod"
+
+DATABASE_LOG = "controle_gestao"
+TABELA_LOG = "log_atividade_scripts"
+
+DATABASE_SAIDA = "controle_gestao"
+TABELA_SAIDA = "lineage_produtor_principal"
+
+# Opcional: guarda também todos os scripts que já aparecem
+# atualmente como produtores de cada tabela.
+TABELA_SAIDA_TODOS = "lineage_produtores_scripts"
+
+
+# ============================================================
+# FUNÇÕES
+# ============================================================
+
+def normalizar(valor):
+    """
+    Normalização para permitir o casamento:
+        Fabric source_database <-> log DATABASE
+        Fabric source_table    <-> log TABELA
+    """
+    if pd.isna(valor):
+        return None
+
+    valor = str(valor).strip()
+
+    valor = unicodedata.normalize("NFKD", valor)
+    valor = "".join(
+        c for c in valor
+        if not unicodedata.combining(c)
+    )
+
+    return valor.lower()
+
+
+# ============================================================
+# 1. LER SOMENTE EVENTOS DE ESCRITA
+# ============================================================
+
+COLUNAS = """
+`SCRIPT`,
+`TIPO`,
+`TABELA`,
+`DATABASE`,
+`COLUNAS`,
+`BANCO`,
+`DIA_EXECUCAO`
+"""
+
+df = c.read_sql(
+    DATABASE_LOG,
+    TABELA_LOG,
+    banco,
+    colunas=COLUNAS,
+    where="(`TIPO` = 'Escrita')"
+)
+
+print(f"Registros de escrita encontrados: {len(df):,}")
+
+
+# ============================================================
+# 2. LIMPEZA
+# ============================================================
+
+df["DIA_EXECUCAO"] = pd.to_datetime(
+    df["DIA_EXECUCAO"],
+    errors="coerce"
+)
+
+df["DATABASE_NORM"] = df["DATABASE"].apply(normalizar)
+df["TABELA_NORM"] = df["TABELA"].apply(normalizar)
+df["SCRIPT_NORM"] = df["SCRIPT"].apply(normalizar)
+
+# Elimina registros que não servem para lineage
+df = df[
+    df["DATABASE_NORM"].notna()
+    & df["TABELA_NORM"].notna()
+    & df["SCRIPT_NORM"].notna()
+].copy()
+
+
+# Chave que posteriormente será usada com o Fabric
+df["CHAVE_FONTE"] = (
+    df["DATABASE_NORM"]
+    + "|"
+    + df["TABELA_NORM"]
+)
+
+
+# ============================================================
+# 3. ÚLTIMA EVIDÊNCIA DE CADA SCRIPT ESCREVENDO CADA TABELA
+# ============================================================
+
+df = df.sort_values(
+    "DIA_EXECUCAO",
+    ascending=False
+)
+
+# Exemplo:
+#
+# movel_rf | pmts_ran | script_a.py
+#
+# Se esse script apareceu 500 vezes no log,
+# fica somente a execução mais recente.
+df_produtores = (
+    df
+    .drop_duplicates(
+        subset=[
+            "DATABASE_NORM",
+            "TABELA_NORM",
+            "SCRIPT_NORM"
+        ],
+        keep="first"
+    )
+    .copy()
+)
+
+
+# ============================================================
+# 4. QUANTOS SCRIPTS ESCREVEM CADA TABELA?
+# ============================================================
+
+qtd_produtores = (
+    df_produtores
+    .groupby(
+        ["DATABASE_NORM", "TABELA_NORM"],
+        as_index=False
+    )
+    .agg(
+        QTD_PRODUTORES=("SCRIPT", "nunique")
+    )
+)
+
+df_produtores = df_produtores.merge(
+    qtd_produtores,
+    on=["DATABASE_NORM", "TABELA_NORM"],
+    how="left"
+)
+
+df_produtores["MULTIPLOS_PRODUTORES"] = (
+    df_produtores["QTD_PRODUTORES"] > 1
+)
+
+
+# ============================================================
+# 5. PRODUTOR PRINCIPAL
+# ============================================================
+#
+# Para a tabela que vamos relacionar ao Power BI,
+# queremos UMA linha por DATABASE + TABELA.
+#
+# Se houver mais de um script escritor, usamos aquele
+# que foi observado escrevendo mais recentemente.
+#
+# NÃO apagamos a informação dos outros escritores:
+# ela fica em lineage_produtores_scripts.
+# ============================================================
+
+df_principal = (
+    df_produtores
+    .sort_values("DIA_EXECUCAO", ascending=False)
+    .drop_duplicates(
+        subset=["DATABASE_NORM", "TABELA_NORM"],
+        keep="first"
+    )
+    .copy()
+)
+
+
+# Renomeia para ficar fácil de entender no BI
+df_principal = df_principal.rename(
+    columns={
+        "SCRIPT": "SCRIPT_GERADOR",
+        "DIA_EXECUCAO": "ULTIMA_EXECUCAO_GERADOR",
+        "COLUNAS": "COLUNAS_ULTIMA_ESCRITA"
+    }
+)
+
+
+# ============================================================
+# 6. COLUNAS FINAIS
+# ============================================================
+
+df_principal = df_principal[
+    [
+        "CHAVE_FONTE",
+        "DATABASE",
+        "TABELA",
+        "DATABASE_NORM",
+        "TABELA_NORM",
+        "SCRIPT_GERADOR",
+        "ULTIMA_EXECUCAO_GERADOR",
+        "COLUNAS_ULTIMA_ESCRITA",
+        "BANCO",
+        "QTD_PRODUTORES",
+        "MULTIPLOS_PRODUTORES"
+    ]
+].reset_index(drop=True)
+
+
+df_produtores_saida = df_produtores[
+    [
+        "CHAVE_FONTE",
+        "DATABASE",
+        "TABELA",
+        "DATABASE_NORM",
+        "TABELA_NORM",
+        "SCRIPT",
+        "DIA_EXECUCAO",
+        "COLUNAS",
+        "BANCO",
+        "QTD_PRODUTORES",
+        "MULTIPLOS_PRODUTORES"
+    ]
+].reset_index(drop=True)
+
+
+# ============================================================
+# 7. MOSTRAR RESULTADO
+# ============================================================
+
+print("\nExemplo - produtor principal:")
+print(df_principal.head(20).to_string(index=False))
+
+print(
+    "\nTabelas com mais de um possível produtor:",
+    int(df_principal["MULTIPLOS_PRODUTORES"].sum())
+)
+
+
+# ============================================================
+# 8. SALVAR NO BANCO
+# ============================================================
+#
+# Aqui eu recomendo REPLACE e não APPEND.
+#
+# Motivo:
+# log_atividade_scripts JÁ É o histórico.
+# Esta tabela representa o estado atual do lineage.
+# ============================================================
+
+c.to_sql(
+    df_principal,
+    DATABASE_SAIDA,
+    TABELA_SAIDA,
+    banco,
+    existente="replace"
+)
+
+c.to_sql(
+    df_produtores_saida,
+    DATABASE_SAIDA,
+    TABELA_SAIDA_TODOS,
+    banco,
+    existente="replace"
+)
+
+print(
+    f"\n[OK] {DATABASE_SAIDA}.{TABELA_SAIDA} criada."
+)
+
+print(
+    f"[OK] {DATABASE_SAIDA}.{TABELA_SAIDA_TODOS} criada."
+)
