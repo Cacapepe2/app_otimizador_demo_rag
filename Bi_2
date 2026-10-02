@@ -1,43 +1,171 @@
+
+
+"""
+MEGA BRAIN - Preparacao leve do catalogo para o modelo semantico
+
+Roda no Notebook Fabric SEM executar novamente o scanner pesado.
+Le diretamente LH_Documentacao.bi_catalog_fontes_reais e cria:
+  - bi_catalog_lineage_bi : fato BI/modelo/tabela -> fonte fisica
+  - dim_fonte             : uma linha por CHAVE_FONTE
+
+Observacao do ambiente atual
+----------------------------
+Nos modelos ODBC observados, o parser pode registrar a navegacao intermediaria
+Kind="Database" em source_table (ex.: movel_rf) e o nome da consulta/tabela em
+partition_name (ex.: pmts_rf). Por isso este preparo usa uma regra de fallback:
+  se source_kind == Database:
+      DATABASE_FONTE = source_table
+      TABELA_FONTE    = partition_name
+  caso contrario:
+      DATABASE_FONTE = source_database_final
+      TABELA_FONTE    = source_table
+
+A CHAVE_FONTE resultante deve ser validada contra
+controle_gestao.lineage_scripts_atual antes de relacionar definitivamente.
+"""
+
 from pyspark.sql import functions as F
 
-df_lineage_bi = (
-    spark.table("bi_catalog_fontes_reais")
-    .select(
-        "workspace_name",
-        "report_name",
-        "semantic_model_name",
-        "model_table",
-        "source_database_final",
-        "source_table",
-        "partition_name",
-        "source_table_norm"
+FONTE_TECNICA = "bi_catalog_fontes_reais"
+TABELA_BI = "bi_catalog_lineage_bi"
+TABELA_DIM_FONTE = "dim_fonte"
+
+
+def norm_col(coluna):
+    return F.lower(F.trim(coluna))
+
+
+base = spark.table(FONTE_TECNICA)
+
+# Garante source_database_norm caso a tabela tecnica nao o possua.
+if "source_database_norm" not in base.columns:
+    base = base.withColumn(
+        "source_database_norm",
+        norm_col(F.col("source_database_final")),
+    )
+
+if "source_table_norm" not in base.columns:
+    base = base.withColumn(
+        "source_table_norm",
+        norm_col(F.col("source_table")),
+    )
+
+# Regra pratica para o padrao ODBC observado no ambiente.
+is_database_navigation = F.upper(F.coalesce(F.col("source_kind"), F.lit(""))) == "DATABASE"
+
+base = (
+    base
+    .withColumn(
+        "database_fonte",
+        F.when(is_database_navigation, F.col("source_table"))
+         .otherwise(F.col("source_database_final")),
     )
     .withColumn(
-        "source_database_norm",
-        F.lower(F.trim(F.col("source_database_final")))
+        "tabela_fonte",
+        F.when(is_database_navigation, F.col("partition_name"))
+         .otherwise(F.col("source_table")),
+    )
+    .withColumn(
+        "database_fonte_norm",
+        norm_col(F.col("database_fonte")),
+    )
+    .withColumn(
+        "tabela_fonte_norm",
+        norm_col(F.col("tabela_fonte")),
     )
     .withColumn(
         "CHAVE_FONTE",
         F.concat_ws(
             "|",
-            F.col("source_database_norm"),
-            F.col("source_table_norm")
-        )
+            F.col("database_fonte_norm"),
+            F.col("tabela_fonte_norm"),
+        ),
     )
+    .withColumn(
+        "source_mapping_method",
+        F.when(
+            is_database_navigation,
+            F.lit("ODBC_DATABASE_NAVIGATION_PARTITION_FALLBACK"),
+        ).otherwise(F.lit("DIRECT_SOURCE_FIELDS")),
+    )
+)
+
+# Tabela enxuta para o modelo semantico.
+colunas_desejadas = [
+    "workspace_name",
+    "report_name",
+    "semantic_model_name",
+    "model_table",
+    "source_database_final",
+    "source_table",
+    "partition_name",
+    "source_table_norm",
+    "database_fonte",
+    "tabela_fonte",
+    "database_fonte_norm",
+    "tabela_fonte_norm",
+    "CHAVE_FONTE",
+    "source_mapping_method",
+]
+
+colunas_existentes = [c for c in colunas_desejadas if c in base.columns]
+
+df_lineage_bi = (
+    base
+    .select(*colunas_existentes)
+    .filter(F.col("CHAVE_FONTE").isNotNull())
+    .filter(F.col("CHAVE_FONTE") != "|")
     .dropDuplicates()
 )
 
-display(df_lineage_bi)
+# Dimensao de fonte: evita many-to-many no semantic model quando uma fonte
+# possui varios BIs e varios scripts produtores/consumidores.
+dim_fonte = (
+    df_lineage_bi
+    .select(
+        "CHAVE_FONTE",
+        "database_fonte",
+        "tabela_fonte",
+        "database_fonte_norm",
+        "tabela_fonte_norm",
+    )
+    .dropDuplicates(["CHAVE_FONTE"])
+)
 
+# Mostra amostra antes de gravar.
+print("Amostra - BI -> fonte:")
+display(
+    df_lineage_bi.select(
+        "report_name",
+        "semantic_model_name",
+        "model_table",
+        "database_fonte",
+        "tabela_fonte",
+        "CHAVE_FONTE",
+        "source_mapping_method",
+    ).limit(100)
+)
+
+print("Amostra - dimensao de fonte:")
+display(dim_fonte.limit(100))
+
+# Salva snapshots atuais.
 (
     df_lineage_bi.write
     .format("delta")
     .mode("overwrite")
     .option("overwriteSchema", "true")
-    .saveAsTable("bi_catalog_lineage_bi")
+    .saveAsTable(TABELA_BI)
 )
 
-print(
-    f"[OK] bi_catalog_lineage_bi criada com "
-    f"{df_lineage_bi.count()} linhas."
+(
+    dim_fonte.write
+    .format("delta")
+    .mode("overwrite")
+    .option("overwriteSchema", "true")
+    .saveAsTable(TABELA_DIM_FONTE)
 )
+
+print(f"[OK] {TABELA_BI}: {df_lineage_bi.count():,} linhas")
+print(f"[OK] {TABELA_DIM_FONTE}: {dim_fonte.count():,} fontes unicas")
+print("[PROXIMO] Validar CHAVE_FONTE contra DATABASE_NORM|TABELA_NORM do lineage de scripts.")
