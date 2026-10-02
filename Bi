@@ -61,7 +61,7 @@ lro_intervalo_segundos = 5
 tentar_tmdl = True
 
 # Se True, salva os DataFrames em tabelas Delta no Lakehouse anexado.
-salvar_no_lakehouse = True
+salvar_no_lakehouse = False
 modo_escrita_lakehouse = "overwrite"
 
 # Nomes das tabelas de saída no Lakehouse.
@@ -70,6 +70,7 @@ tabela_reports = "bi_catalog_reports"
 tabela_modelos = "bi_catalog_modelos"
 tabela_datasources = "bi_catalog_datasources"
 tabela_model_tables = "bi_catalog_model_tables"
+tabela_fontes_reais = "bi_catalog_fontes_reais"
 
 
 # ============================================================
@@ -375,6 +376,179 @@ def resolver_token_m(token_m, parametros):
     return parametros.get(token_m, token_m)
 
 
+
+def nome_query_para_database(nome_query):
+    """
+    Fallback controlado para queries auxiliares do Power Query, por exemplo:
+      orion_Database -> orion
+      #"ORION Database" -> ORION
+    Isso NÃO é usado como prova absoluta; serve como hint quando a própria
+    navegação M mostra que a tabela veio dessa query de conexão.
+    """
+    nome_query = remover_aspas_tmdl(nome_query)
+    nome_query = texto_limpo(nome_query)
+    if nome_query is None:
+        return None
+
+    limpo = re.sub(r'(?i)[ _-]*database$', '', nome_query).strip(' _-')
+    return limpo or nome_query
+
+
+def extrair_expressoes_m(arquivos):
+    """
+    Extrai queries/expressions compartilhadas do TMDL para permitir resolver
+    referências como `orion_Database{[Name="cadastro_aceite_base",Kind="Table"]}[Data]`.
+    """
+    expressoes = {}
+
+    # Uma expression TMDL costuma aparecer como bloco de topo.
+    # Capturamos até o próximo objeto de topo conhecido ou fim do arquivo.
+    padrao = re.compile(
+        r'(?ms)^\s*expression\s+(?:\'([^\']+)\'|([^\s=]+))\s*=\s*(.*?)'
+        r'(?=^\s*(?:expression|table|relationship|role|culture|annotation)\b|\Z)'
+    )
+
+    for texto in arquivos.values():
+        for m in padrao.finditer(texto):
+            nome = (m.group(1) or m.group(2) or '').strip()
+            corpo = (m.group(3) or '').strip()
+            if nome:
+                expressoes[nome] = corpo
+
+    return expressoes
+
+
+def resolver_query_conexao(nome_query, expressoes, parametros):
+    """
+    Tenta descobrir detalhes da query de conexão referenciada pela partição M.
+    Retorna apenas o que consegue provar; `database_hint` pode vir do nome da query.
+    """
+    if not nome_query:
+        return {}
+
+    nome_limpo = remover_aspas_tmdl(nome_query)
+    corpo = expressoes.get(nome_limpo, '')
+
+    out = {
+        'source_query': nome_limpo,
+        'query_source_type': detectar_tipo_fonte(corpo) if corpo else None,
+        'query_server': None,
+        'query_database': None,
+        'query_url': None,
+        'database_hint': nome_query_para_database(nome_limpo),
+    }
+
+    if corpo:
+        # SQL.Database(server, database)
+        m_sql = re.search(
+            r'Sql\.Database\(\s*([^,\)]+)\s*,\s*([^\)]+?)\s*(?:,\s*\[|\))',
+            corpo,
+            flags=re.I | re.S,
+        )
+        if m_sql:
+            out['query_server'] = resolver_token_m(m_sql.group(1).strip(), parametros)
+            out['query_database'] = resolver_token_m(m_sql.group(2).strip(), parametros)
+
+        # ODBC: procura DSN/Database no texto da conexão quando estiver explícito.
+        m_dsn = re.search(r'(?i)\bDSN\s*=\s*([^;\"\']+)', corpo)
+        if m_dsn:
+            out['query_database'] = m_dsn.group(1).strip()
+
+        if out['query_database'] is None:
+            m_db = re.search(r'(?i)\b(?:Database|DBQ|Initial Catalog)\s*=\s*([^;\"\']+)', corpo)
+            if m_db:
+                out['query_database'] = m_db.group(1).strip()
+
+        m_url = re.search(r'https?://[^\"\s\)]+', corpo)
+        if m_url:
+            out['query_url'] = m_url.group(0)
+
+    return out
+
+
+def extrair_navegacao_power_query(texto):
+    """
+    Resolve os padrões de navegação mais comuns do Power Query.
+
+    Exemplos cobertos:
+      orion_Database{[Name="cadastro_aceite_base", Kind="Table"]}[Data]
+      Source{[Schema="dbo", Item="minha_tabela"]}[Data]
+      #"Minha Conexao"{[Name="X",Kind="Table"]}[Data]
+    """
+    # Query M referenciada imediatamente antes de {[...]}
+    raiz = r'(?P<root>#\"[^\"]+\"|[A-Za-z_][A-Za-z0-9_]*)'
+
+    # Name/Kind (muito comum em ODBC e navegadores genéricos)
+    p_name_kind = re.compile(
+        raiz
+        + r'\s*\{\s*\[\s*Name\s*=\s*\"(?P<table>[^\"]+)\"'
+          r'\s*,\s*Kind\s*=\s*\"(?P<kind>[^\"]+)\"\s*\]\s*\}\s*\[Data\]',
+        flags=re.I | re.S,
+    )
+    m = p_name_kind.search(texto)
+    if m:
+        return {
+            'source_query': remover_aspas_tmdl(m.group('root')),
+            'source_schema': None,
+            'source_table': m.group('table'),
+            'source_kind': m.group('kind'),
+            'navigation_pattern': 'NAME_KIND',
+        }
+
+    # Schema/Item em qualquer ordem
+    p_schema_item = re.compile(
+        raiz
+        + r'\s*\{\s*\[\s*Schema\s*=\s*\"(?P<schema>[^\"]+)\"'
+          r'\s*,\s*(?:Item|Name)\s*=\s*\"(?P<table>[^\"]+)\"\s*\]\s*\}\s*\[Data\]',
+        flags=re.I | re.S,
+    )
+    m = p_schema_item.search(texto)
+    if m:
+        return {
+            'source_query': remover_aspas_tmdl(m.group('root')),
+            'source_schema': m.group('schema'),
+            'source_table': m.group('table'),
+            'source_kind': 'Table',
+            'navigation_pattern': 'SCHEMA_ITEM',
+        }
+
+    p_item_schema = re.compile(
+        raiz
+        + r'\s*\{\s*\[\s*(?:Item|Name)\s*=\s*\"(?P<table>[^\"]+)\"'
+          r'\s*,\s*Schema\s*=\s*\"(?P<schema>[^\"]+)\"\s*\]\s*\}\s*\[Data\]',
+        flags=re.I | re.S,
+    )
+    m = p_item_schema.search(texto)
+    if m:
+        return {
+            'source_query': remover_aspas_tmdl(m.group('root')),
+            'source_schema': m.group('schema'),
+            'source_table': m.group('table'),
+            'source_kind': 'Table',
+            'navigation_pattern': 'ITEM_SCHEMA',
+        }
+
+    # Fallback mais tolerante: pega Name sozinho dentro de {[...]}
+    p_name = re.compile(
+        raiz + r'\s*\{\s*\[(?P<body>[^\]]*\bName\s*=\s*\"[^\"]+\"[^\]]*)\]\s*\}\s*\[Data\]',
+        flags=re.I | re.S,
+    )
+    m = p_name.search(texto)
+    if m:
+        body = m.group('body')
+        mt = re.search(r'(?i)\bName\s*=\s*\"([^\"]+)\"', body)
+        mk = re.search(r'(?i)\bKind\s*=\s*\"([^\"]+)\"', body)
+        ms = re.search(r'(?i)\bSchema\s*=\s*\"([^\"]+)\"', body)
+        return {
+            'source_query': remover_aspas_tmdl(m.group('root')),
+            'source_schema': ms.group(1) if ms else None,
+            'source_table': mt.group(1) if mt else None,
+            'source_kind': mk.group(1) if mk else None,
+            'navigation_pattern': 'NAME_FALLBACK',
+        }
+
+    return None
+
 def detectar_tipo_fonte(texto):
     testes = [
         ("Sql.Database", "SQL"),
@@ -399,7 +573,7 @@ def detectar_tipo_fonte(texto):
     return "UNKNOWN"
 
 
-def parsear_tabela_tmdl(path, texto, parametros):
+def parsear_tabela_tmdl(path, texto, parametros, expressoes):
     """
     Best effort parser.
     Retorna a origem física quando o TMDL explicita essa informação.
@@ -429,6 +603,9 @@ def parsear_tabela_tmdl(path, texto, parametros):
     source_schema = None
     source_table = None
     source_url = None
+    source_query = None
+    source_kind = None
+    navigation_pattern = None
     resolution = "UNKNOWN"
 
     # Sql.Database(server, database)
@@ -442,27 +619,32 @@ def parsear_tabela_tmdl(path, texto, parametros):
         source_database = resolver_token_m(m_sql.group(2).strip(), parametros)
         resolution = "CONNECTION_ONLY"
 
-    # Navegação Power Query: Source{[Schema="dbo", Item="Tabela"]}[Data]
-    m_nav = re.search(
-        r"\[\s*Schema\s*=\s*\"([^\"]+)\"\s*,\s*(?:Item|Name)\s*=\s*\"([^\"]+)\"\s*\]",
-        texto,
-        flags=re.I,
-    )
-    if not m_nav:
-        # Ordem invertida Item/Schema.
-        m_nav2 = re.search(
-            r"\[\s*(?:Item|Name)\s*=\s*\"([^\"]+)\"\s*,\s*Schema\s*=\s*\"([^\"]+)\"\s*\]",
-            texto,
-            flags=re.I,
-        )
-        if m_nav2:
-            source_table = m_nav2.group(1)
-            source_schema = m_nav2.group(2)
-            resolution = "EXACT_TABLE"
-    else:
-        source_schema = m_nav.group(1)
-        source_table = m_nav.group(2)
-        resolution = "EXACT_TABLE"
+    # Navegação Power Query (ODBC/SQL/etc).
+    nav = extrair_navegacao_power_query(texto)
+    if nav:
+        source_query = nav.get("source_query")
+        source_schema = nav.get("source_schema")
+        source_table = nav.get("source_table")
+        source_kind = nav.get("source_kind")
+        navigation_pattern = nav.get("navigation_pattern")
+        resolution = "EXACT_TABLE_POWER_QUERY"
+
+        # Tenta resolver a query de conexão referenciada, ex.: orion_Database.
+        query_info = resolver_query_conexao(source_query, expressoes, parametros)
+        if query_info:
+            if not source_server:
+                source_server = query_info.get("query_server")
+            if not source_database:
+                source_database = query_info.get("query_database")
+            if not source_url:
+                source_url = query_info.get("query_url")
+            # Quando a conexão não expõe o database mas a query é explicitamente
+            # algo como orion_Database, usamos esse nome como hint rastreável.
+            if not source_database and query_info.get("database_hint"):
+                source_database = query_info.get("database_hint")
+                resolution = "EXACT_TABLE_QUERY_DATABASE_HINT"
+            if source_type == "UNKNOWN" and query_info.get("query_source_type"):
+                source_type = query_info.get("query_source_type")
 
     # Direct Lake entity partition.
     m_entity = re.search(r"(?im)^\s*entityName\s*:\s*(.+?)\s*$", texto)
@@ -503,6 +685,9 @@ def parsear_tabela_tmdl(path, texto, parametros):
         "source_schema": source_schema,
         "source_table": source_table,
         "source_url": source_url,
+        "source_query": source_query,
+        "source_kind": source_kind,
+        "navigation_pattern": navigation_pattern,
         "source_resolution": resolution,
         # Trecho limitado para diagnóstico; evita criar uma tabela gigante.
         "source_expression_excerpt": re.sub(r"\s+", " ", texto)[:1500],
@@ -512,11 +697,12 @@ def parsear_tabela_tmdl(path, texto, parametros):
 def parsear_tmdl_modelo(definition_payload):
     arquivos = decodificar_partes_tmdl(definition_payload)
     parametros = extrair_parametros_tmdl(arquivos)
+    expressoes = extrair_expressoes_m(arquivos)
 
     linhas = []
     for path, texto in arquivos.items():
         if path.startswith("definition/tables/") and path.endswith(".tmdl"):
-            linha = parsear_tabela_tmdl(path, texto, parametros)
+            linha = parsear_tabela_tmdl(path, texto, parametros, expressoes)
             linha["tmdl_path"] = path
             linhas.append(linha)
 
@@ -731,6 +917,9 @@ for i, modelo in enumerate(modelos_rows, start=1):
                 "source_schema": None,
                 "source_table": None,
                 "source_url": None,
+                "source_query": None,
+                "source_kind": None,
+                "navigation_pattern": None,
                 "source_resolution": "TMDL_NOT_AVAILABLE",
                 "source_expression_excerpt": None,
                 "tmdl_path": None,
@@ -769,7 +958,8 @@ else:
     for col in [
         "model_table", "partition_name", "partition_kind", "partition_mode",
         "source_type", "source_server", "source_database", "source_schema",
-        "source_table", "source_url", "source_resolution", "tmdl_status",
+        "source_table", "source_url", "source_query", "source_kind",
+        "navigation_pattern", "source_resolution", "tmdl_status",
         "tmdl_error", "tmdl_path", "source_expression_excerpt"
     ]:
         base_fontes[col] = None
@@ -869,6 +1059,29 @@ if "source_resolution" in df_final.columns:
 print("\nAmostra do catálogo final:")
 display(df_final.head(100))
 
+# Visão limpa para o caso de uso principal: apenas fontes físicas resolvidas.
+# Remove DateTable/LocalDateTable/calculated tables e mantém o que tem tabela de origem.
+df_fontes_reais = df_final.copy()
+if "source_table" in df_fontes_reais.columns:
+    df_fontes_reais = df_fontes_reais[df_fontes_reais["source_table"].notna()]
+if "partition_kind" in df_fontes_reais.columns:
+    df_fontes_reais = df_fontes_reais[
+        ~df_fontes_reais["partition_kind"].astype(str).str.lower().eq("calculated")
+    ]
+
+cols_fontes_reais = [c for c in [
+    "workspace_name", "report_name", "semantic_model_name", "model_table",
+    "source_query", "source_type_final", "source_database_final",
+    "source_schema", "source_table", "source_kind", "source_full_name",
+    "source_resolution", "tmdl_status", "datasource_status"
+] if c in df_fontes_reais.columns]
+
+print("\nFontes físicas resolvidas (visão limpa):")
+if not df_fontes_reais.empty:
+    display(df_fontes_reais[cols_fontes_reais].drop_duplicates().head(200))
+else:
+    print("Nenhuma fonte física foi resolvida nesta execução.")
+
 
 # ------------------------------------------------------------
 # 6) SALVAR NO LAKEHOUSE
@@ -879,6 +1092,7 @@ salvar_delta(df_modelos, tabela_modelos)
 salvar_delta(df_datasources, tabela_datasources)
 salvar_delta(df_model_tables, tabela_model_tables)
 salvar_delta(df_final, tabela_catalogo_final)
+salvar_delta(df_fontes_reais, tabela_fontes_reais)
 
 print("\n" + "=" * 80)
 print("SCAN FINALIZADO")
