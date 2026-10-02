@@ -1,0 +1,888 @@
+# ============================================================
+# FABRIC METADATA SCANNER - BI -> MODELO SEMANTICO -> FONTE
+# ============================================================
+# Objetivo:
+#   1) Listar os relatórios (BIs) do workspace.
+#   2) Relacionar cada BI ao seu modelo semântico.
+#   3) Identificar as fontes de dados do modelo.
+#   4) Quando houver permissão, abrir a definição TMDL e tentar
+#      resolver a tabela física usada por cada tabela do modelo.
+#   5) Gerar um DataFrame consolidado pronto para ser cruzado com
+#      controle_gestao.log_atividade_scripts.
+#   6) Opcionalmente salvar o resultado como tabelas Delta no Lakehouse.
+#
+# Observação importante:
+#   - Não precisa de Client ID / Secret para o MVP quando o notebook
+#     roda com sua identidade de usuário no Fabric.
+#   - O token é obtido com notebookutils.credentials.getToken("pbi").
+#   - Algumas APIs exigem permissão de escrita no modelo. Quando isso
+#     acontecer, o scanner NÃO quebra: ele registra o status e continua.
+# ============================================================
+
+import time
+import json
+import base64
+import re
+import unicodedata
+from pathlib import PurePosixPath
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+import pandas as pd
+import requests
+import sempy.fabric as fabric
+import notebookutils
+
+
+# ============================================================
+# CONFIGURAÇÕES GERAIS
+# ============================================================
+
+# Se o notebook está no mesmo workspace que os modelos, deixe None.
+workspace = None
+
+# Se quiser especificar outro workspace:
+# workspace = "NOME_EXATO_DO_WORKSPACE"
+
+workspace_nome_log = "Workspace_atual" if workspace is None else workspace
+
+# Fuso usado no carimbo da coleta.
+timezone_local = "America/Sao_Paulo"
+
+# Timeout das chamadas REST.
+request_timeout_segundos = 60
+
+# Polling para APIs Fabric que responderem 202 (Long Running Operation).
+lro_timeout_segundos = 180
+lro_intervalo_segundos = 5
+
+# Se True, tenta abrir a definição TMDL para chegar até a tabela física.
+# Esse passo pode exigir ReadWrite no modelo semântico.
+tentar_tmdl = True
+
+# Se True, salva os DataFrames em tabelas Delta no Lakehouse anexado.
+salvar_no_lakehouse = True
+modo_escrita_lakehouse = "overwrite"
+
+# Nomes das tabelas de saída no Lakehouse.
+tabela_catalogo_final = "bi_catalog_fontes_dados"
+tabela_reports = "bi_catalog_reports"
+tabela_modelos = "bi_catalog_modelos"
+tabela_datasources = "bi_catalog_datasources"
+tabela_model_tables = "bi_catalog_model_tables"
+
+
+# ============================================================
+# MODELOS A EXCLUIR / INCLUIR
+# Mesma ideia da estrutura do notebook de observabilidade.
+# ============================================================
+
+# Exclusão por nome exato.
+modelos_excluir_exato = [
+    "Report Usage Metrics Model",
+    "Usage Metrics Report",
+]
+
+# Exclusão quando o nome contiver algum desses textos.
+modelos_excluir_contem = [
+    "Usage Metrics",
+    "Report Usage Metrics",
+]
+
+# Opcional: se quiser monitorar somente alguns modelos, preencha.
+# Se ficar vazio, considera todos, exceto os excluídos.
+modelos_incluir_apenas = [
+    # "Móvel - Licenciamento Anatel",
+    # "Móvel - WR Pendentes",
+]
+
+
+# ============================================================
+# FUNÇÕES AUXILIARES
+# ============================================================
+
+def agora_local():
+    return datetime.now(ZoneInfo(timezone_local))
+
+
+def texto_limpo(valor):
+    if valor is None:
+        return None
+    valor = str(valor).strip()
+    return valor if valor else None
+
+
+def normalizar_chave(valor):
+    """Normalização leve para facilitar joins posteriores com o log."""
+    valor = texto_limpo(valor)
+    if valor is None:
+        return None
+    valor = unicodedata.normalize("NFKD", valor)
+    valor = "".join(c for c in valor if not unicodedata.combining(c))
+    return valor.lower().strip()
+
+
+def modelo_permitido(nome):
+    nome = texto_limpo(nome) or ""
+
+    if nome in modelos_excluir_exato:
+        return False
+
+    nome_lower = nome.lower()
+    if any(x.lower() in nome_lower for x in modelos_excluir_contem):
+        return False
+
+    if modelos_incluir_apenas:
+        permitidos = {x.lower() for x in modelos_incluir_apenas}
+        return nome_lower in permitidos
+
+    return True
+
+
+def get_workspace_id_e_nome():
+    """Resolve ID e nome do workspace atual ou do workspace configurado."""
+    if workspace is None:
+        ws_id = str(fabric.get_workspace_id())
+        try:
+            ws_nome = fabric.resolve_workspace_name(ws_id)
+        except Exception:
+            ws_nome = workspace_nome_log
+        return ws_id, ws_nome
+
+    ws_id = str(fabric.resolve_workspace_id(workspace))
+    try:
+        ws_nome = fabric.resolve_workspace_name(ws_id)
+    except Exception:
+        ws_nome = str(workspace)
+    return ws_id, ws_nome
+
+
+def get_pbi_token():
+    return notebookutils.credentials.getToken("pbi")
+
+
+def headers_api(token):
+    return {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+
+def request_json(method, url, token, **kwargs):
+    """Chamada REST com erro legível."""
+    resp = requests.request(
+        method,
+        url,
+        headers=headers_api(token),
+        timeout=request_timeout_segundos,
+        **kwargs,
+    )
+
+    if resp.status_code >= 400:
+        try:
+            detalhe = resp.json()
+        except Exception:
+            detalhe = resp.text[:1000]
+        raise RuntimeError(f"HTTP {resp.status_code} - {url} - {detalhe}")
+
+    if not resp.content:
+        return None, resp
+
+    try:
+        return resp.json(), resp
+    except Exception:
+        return resp.text, resp
+
+
+def listar_reports_powerbi(workspace_id, token):
+    """Lista relatórios e traz datasetId/modelo semântico associado."""
+    url = f"https://api.powerbi.com/v1.0/myorg/groups/{workspace_id}/reports"
+    payload, _ = request_json("GET", url, token)
+    return payload.get("value", []) if payload else []
+
+
+def listar_modelos_powerbi(workspace_id, token):
+    """Lista modelos semânticos/datasets do workspace."""
+    url = f"https://api.powerbi.com/v1.0/myorg/groups/{workspace_id}/datasets"
+    payload, _ = request_json("GET", url, token)
+    return payload.get("value", []) if payload else []
+
+
+def obter_datasources_modelo(workspace_id, model_id, token):
+    """
+    Retorna conexões conhecidas do modelo.
+    Atenção: a API Power BI atualmente exige Write no dataset/modelo.
+    """
+    url = (
+        "https://api.powerbi.com/v1.0/myorg/groups/"
+        f"{workspace_id}/datasets/{model_id}/datasources"
+    )
+
+    try:
+        payload, _ = request_json("GET", url, token)
+        return payload.get("value", []) if payload else [], "OK", None
+    except Exception as exc:
+        return [], "SEM_PERMISSAO_OU_NAO_SUPORTADO", str(exc)
+
+
+def obter_definition_tmdl(workspace_id, model_id, token):
+    """
+    Obtém a definição TMDL via Fabric REST API.
+    Suporta resposta imediata (200) ou Long Running Operation (202).
+    """
+    url = (
+        "https://api.fabric.microsoft.com/v1/workspaces/"
+        f"{workspace_id}/semanticModels/{model_id}/getDefinition?format=TMDL"
+    )
+
+    resp = requests.post(
+        url,
+        headers=headers_api(token),
+        timeout=request_timeout_segundos,
+    )
+
+    if resp.status_code == 200:
+        return resp.json(), "OK", None
+
+    if resp.status_code == 202:
+        operation_id = resp.headers.get("x-ms-operation-id")
+        location = resp.headers.get("Location")
+        retry_after = int(resp.headers.get("Retry-After", lro_intervalo_segundos))
+
+        if not operation_id and not location:
+            return None, "ERRO_LRO", "API respondeu 202 sem operation id/location."
+
+        state_url = location or f"https://api.fabric.microsoft.com/v1/operations/{operation_id}"
+        inicio = time.time()
+
+        while time.time() - inicio < lro_timeout_segundos:
+            time.sleep(max(1, retry_after))
+            state_resp = requests.get(
+                state_url,
+                headers=headers_api(token),
+                timeout=request_timeout_segundos,
+            )
+
+            if state_resp.status_code >= 400:
+                return None, "ERRO_LRO", state_resp.text[:1000]
+
+            state = state_resp.json() if state_resp.content else {}
+            status = str(state.get("status", "")).lower()
+
+            if status == "failed":
+                return None, "ERRO_LRO", json.dumps(state, ensure_ascii=False)
+
+            if status == "succeeded":
+                result_url = f"https://api.fabric.microsoft.com/v1/operations/{operation_id}/result"
+                result_resp = requests.get(
+                    result_url,
+                    headers=headers_api(token),
+                    timeout=request_timeout_segundos,
+                )
+
+                if result_resp.status_code >= 400:
+                    return None, "ERRO_LRO_RESULT", result_resp.text[:1000]
+
+                return result_resp.json(), "OK", None
+
+            # Em algumas respostas o Location passa a apontar para /result.
+            novo_location = state_resp.headers.get("Location")
+            if novo_location:
+                state_url = novo_location
+            retry_after = int(state_resp.headers.get("Retry-After", lro_intervalo_segundos))
+
+        return None, "TIMEOUT_TMDL", f"Timeout após {lro_timeout_segundos}s."
+
+    # 403/404/etc: registra e continua.
+    try:
+        detalhe = resp.json()
+    except Exception:
+        detalhe = resp.text[:1000]
+    return None, f"HTTP_{resp.status_code}", str(detalhe)
+
+
+def decodificar_partes_tmdl(definition_payload):
+    """Converte os parts InlineBase64 em {path: texto}."""
+    arquivos = {}
+    if not definition_payload:
+        return arquivos
+
+    definition = definition_payload.get("definition", {})
+    parts = definition.get("parts", [])
+
+    for part in parts:
+        path = part.get("path")
+        payload = part.get("payload")
+        payload_type = part.get("payloadType")
+
+        if not path or not payload:
+            continue
+
+        try:
+            if payload_type == "InlineBase64":
+                texto = base64.b64decode(payload).decode("utf-8", errors="replace")
+            else:
+                texto = str(payload)
+            arquivos[path] = texto
+        except Exception:
+            continue
+
+    return arquivos
+
+
+def remover_aspas_tmdl(valor):
+    valor = texto_limpo(valor)
+    if valor is None:
+        return None
+    if valor.startswith("#\"") and valor.endswith("\""):
+        return valor[2:-1]
+    if (valor.startswith("\"") and valor.endswith("\"")) or (
+        valor.startswith("'") and valor.endswith("'")
+    ):
+        return valor[1:-1]
+    return valor
+
+
+def extrair_parametros_tmdl(arquivos):
+    """Tenta resolver expressions simples como expression Server = \"...\"."""
+    parametros = {}
+    padrao = re.compile(
+        r"(?m)^\s*expression\s+(?:'([^']+)'|([^\s=]+))\s*=\s*\"([^\"]*)\""
+    )
+
+    for texto in arquivos.values():
+        for m in padrao.finditer(texto):
+            nome = m.group(1) or m.group(2)
+            parametros[nome] = m.group(3)
+
+    return parametros
+
+
+def resolver_token_m(token_m, parametros):
+    token_m = texto_limpo(token_m)
+    if token_m is None:
+        return None
+
+    # literal "valor"
+    if token_m.startswith('"') and token_m.endswith('"'):
+        return token_m[1:-1]
+
+    # identificador Power Query #"Nome Parametro"
+    if token_m.startswith('#"') and token_m.endswith('"'):
+        nome = token_m[2:-1]
+        return parametros.get(nome, nome)
+
+    return parametros.get(token_m, token_m)
+
+
+def detectar_tipo_fonte(texto):
+    testes = [
+        ("Sql.Database", "SQL"),
+        ("PostgreSQL.Database", "POSTGRESQL"),
+        ("Oracle.Database", "ORACLE"),
+        ("Snowflake.Databases", "SNOWFLAKE"),
+        ("Odbc.DataSource", "ODBC"),
+        ("OData.Feed", "ODATA"),
+        ("SharePoint.Files", "SHAREPOINT"),
+        ("SharePoint.Contents", "SHAREPOINT"),
+        ("Web.Contents", "WEB"),
+        ("Excel.Workbook", "EXCEL"),
+        ("AzureStorage.DataLake", "ONELAKE_OR_ADLS"),
+        ("Lakehouse.Contents", "LAKEHOUSE"),
+        ("PowerPlatform.Dataflows", "DATAFLOW"),
+    ]
+    for trecho, nome in testes:
+        if trecho.lower() in texto.lower():
+            return nome
+    if re.search(r"(?im)^\s*entityName\s*:", texto):
+        return "DIRECT_LAKE"
+    return "UNKNOWN"
+
+
+def parsear_tabela_tmdl(path, texto, parametros):
+    """
+    Best effort parser.
+    Retorna a origem física quando o TMDL explicita essa informação.
+    Não inventa origem quando não consegue provar.
+    """
+    nome_arquivo = PurePosixPath(path).stem
+
+    m_table = re.search(r"(?m)^\s*table\s+(?:'([^']+)'|([^\r\n]+))\s*$", texto)
+    model_table = (m_table.group(1) or m_table.group(2)).strip() if m_table else nome_arquivo
+
+    m_partition = re.search(
+        r"(?m)^\s*partition\s+(?:'([^']+)'|([^=\r\n]+))\s*=\s*([^\r\n]+)",
+        texto,
+    )
+    partition_name = None
+    partition_kind = None
+    if m_partition:
+        partition_name = texto_limpo(m_partition.group(1) or m_partition.group(2))
+        partition_kind = texto_limpo(m_partition.group(3))
+
+    m_mode = re.search(r"(?im)^\s*mode\s*:\s*([^\r\n]+)", texto)
+    partition_mode = texto_limpo(m_mode.group(1)) if m_mode else None
+
+    source_type = detectar_tipo_fonte(texto)
+    source_server = None
+    source_database = None
+    source_schema = None
+    source_table = None
+    source_url = None
+    resolution = "UNKNOWN"
+
+    # Sql.Database(server, database)
+    m_sql = re.search(
+        r"Sql\.Database\(\s*([^,\)]+)\s*,\s*([^\)]+?)\s*(?:,\s*\[|\))",
+        texto,
+        flags=re.I | re.S,
+    )
+    if m_sql:
+        source_server = resolver_token_m(m_sql.group(1).strip(), parametros)
+        source_database = resolver_token_m(m_sql.group(2).strip(), parametros)
+        resolution = "CONNECTION_ONLY"
+
+    # Navegação Power Query: Source{[Schema="dbo", Item="Tabela"]}[Data]
+    m_nav = re.search(
+        r"\[\s*Schema\s*=\s*\"([^\"]+)\"\s*,\s*(?:Item|Name)\s*=\s*\"([^\"]+)\"\s*\]",
+        texto,
+        flags=re.I,
+    )
+    if not m_nav:
+        # Ordem invertida Item/Schema.
+        m_nav2 = re.search(
+            r"\[\s*(?:Item|Name)\s*=\s*\"([^\"]+)\"\s*,\s*Schema\s*=\s*\"([^\"]+)\"\s*\]",
+            texto,
+            flags=re.I,
+        )
+        if m_nav2:
+            source_table = m_nav2.group(1)
+            source_schema = m_nav2.group(2)
+            resolution = "EXACT_TABLE"
+    else:
+        source_schema = m_nav.group(1)
+        source_table = m_nav.group(2)
+        resolution = "EXACT_TABLE"
+
+    # Direct Lake entity partition.
+    m_entity = re.search(r"(?im)^\s*entityName\s*:\s*(.+?)\s*$", texto)
+    m_schema = re.search(r"(?im)^\s*schemaName\s*:\s*(.+?)\s*$", texto)
+    if m_entity:
+        source_table = remover_aspas_tmdl(m_entity.group(1))
+        source_schema = remover_aspas_tmdl(m_schema.group(1)) if m_schema else source_schema
+        source_type = "DIRECT_LAKE"
+        resolution = "EXACT_TABLE"
+
+    # URLs / OneLake / SharePoint / Web.
+    m_url = re.search(r"https?://[^\"\s\)]+", texto)
+    if m_url:
+        source_url = m_url.group(0)
+        if resolution == "UNKNOWN":
+            resolution = "CONNECTION_ONLY"
+
+    # Native SQL: tenta achar FROM schema.table. Mantém como best effort.
+    if source_table is None:
+        m_from = re.search(
+            r"(?is)\bFROM\s+(?:\[([^\]]+)\]|([A-Za-z0-9_]+))\."
+            r"(?:\[([^\]]+)\]|([A-Za-z0-9_]+))",
+            texto,
+        )
+        if m_from:
+            source_schema = m_from.group(1) or m_from.group(2)
+            source_table = m_from.group(3) or m_from.group(4)
+            resolution = "EXACT_TABLE_NATIVE_SQL"
+
+    return {
+        "model_table": model_table,
+        "partition_name": partition_name,
+        "partition_kind": partition_kind,
+        "partition_mode": partition_mode,
+        "source_type": source_type,
+        "source_server": source_server,
+        "source_database": source_database,
+        "source_schema": source_schema,
+        "source_table": source_table,
+        "source_url": source_url,
+        "source_resolution": resolution,
+        # Trecho limitado para diagnóstico; evita criar uma tabela gigante.
+        "source_expression_excerpt": re.sub(r"\s+", " ", texto)[:1500],
+    }
+
+
+def parsear_tmdl_modelo(definition_payload):
+    arquivos = decodificar_partes_tmdl(definition_payload)
+    parametros = extrair_parametros_tmdl(arquivos)
+
+    linhas = []
+    for path, texto in arquivos.items():
+        if path.startswith("definition/tables/") and path.endswith(".tmdl"):
+            linha = parsear_tabela_tmdl(path, texto, parametros)
+            linha["tmdl_path"] = path
+            linhas.append(linha)
+
+    return linhas
+
+
+def connection_details_para_colunas(datasource):
+    details = datasource.get("connectionDetails") or {}
+
+    # A API varia por conector. Guardamos o JSON completo e extraímos os campos comuns.
+    server = details.get("server") or details.get("host")
+    database = details.get("database")
+    url = details.get("url") or details.get("siteUrl")
+    path = details.get("path")
+
+    return {
+        "datasource_type": datasource.get("datasourceType"),
+        "datasource_id": datasource.get("datasourceId"),
+        "gateway_id": datasource.get("gatewayId"),
+        "connection_server": server,
+        "connection_database": database,
+        "connection_url": url,
+        "connection_path": path,
+        "connection_details_json": json.dumps(details, ensure_ascii=False, default=str),
+    }
+
+
+def salvar_delta(df, nome_tabela):
+    if not salvar_no_lakehouse:
+        return
+
+    if df is None or df.empty:
+        print(f"[INFO] {nome_tabela}: DataFrame vazio; não será salvo.")
+        return
+
+    # Tudo que chega aqui deve ser simples/serializável.
+    df_out = df.copy()
+    for col in df_out.columns:
+        if df_out[col].dtype == "object":
+            df_out[col] = df_out[col].apply(
+                lambda x: json.dumps(x, ensure_ascii=False, default=str)
+                if isinstance(x, (dict, list))
+                else x
+            )
+
+    spark_df = spark.createDataFrame(df_out)
+    (
+        spark_df.write
+        .format("delta")
+        .mode(modo_escrita_lakehouse)
+        .option("overwriteSchema", "true")
+        .saveAsTable(nome_tabela)
+    )
+    print(f"[OK] Salvo: {nome_tabela} ({len(df_out)} linhas)")
+
+
+# ============================================================
+# EXECUÇÃO
+# ============================================================
+
+scan_at = agora_local()
+workspace_id, workspace_name = get_workspace_id_e_nome()
+token = get_pbi_token()
+
+print("=" * 80)
+print("FABRIC METADATA SCANNER")
+print(f"Workspace: {workspace_name}")
+print(f"Workspace ID: {workspace_id}")
+print(f"Scan: {scan_at.isoformat()}")
+print("=" * 80)
+
+
+# ------------------------------------------------------------
+# 1) REPORTS / BIs
+# ------------------------------------------------------------
+
+reports_raw = listar_reports_powerbi(workspace_id, token)
+reports_rows = []
+
+for r in reports_raw:
+    reports_rows.append({
+        "workspace_id": workspace_id,
+        "workspace_name": workspace_name,
+        "report_id": r.get("id"),
+        "report_name": r.get("name"),
+        "semantic_model_id": r.get("datasetId"),
+        "report_type": r.get("reportType"),
+        "report_format": r.get("format"),
+        "web_url": r.get("webUrl"),
+        "scan_at": scan_at,
+    })
+
+df_reports = pd.DataFrame(reports_rows)
+print(f"Reports encontrados: {len(df_reports)}")
+
+
+# ------------------------------------------------------------
+# 2) MODELOS SEMÂNTICOS
+# ------------------------------------------------------------
+
+modelos_raw = listar_modelos_powerbi(workspace_id, token)
+modelos_rows = []
+
+for m in modelos_raw:
+    nome = m.get("name")
+    if not modelo_permitido(nome):
+        continue
+
+    modelos_rows.append({
+        "workspace_id": workspace_id,
+        "workspace_name": workspace_name,
+        "semantic_model_id": m.get("id"),
+        "semantic_model_name": nome,
+        "configured_by": m.get("configuredBy"),
+        "is_refreshable": m.get("isRefreshable"),
+        "is_on_prem_gateway_override": m.get("isOnPremGatewayEnabled"),
+        "scan_at": scan_at,
+    })
+
+df_modelos = pd.DataFrame(modelos_rows)
+print(f"Modelos considerados: {len(df_modelos)}")
+
+
+# ------------------------------------------------------------
+# 3) FONTES / DATASOURCES + TMDL
+# ------------------------------------------------------------
+
+datasource_rows = []
+model_table_rows = []
+
+for i, modelo in enumerate(modelos_rows, start=1):
+    model_id = modelo["semantic_model_id"]
+    model_name = modelo["semantic_model_name"]
+
+    print(f"[{i}/{len(modelos_rows)}] {model_name}")
+
+    # 3A) Connection-level datasource.
+    datasources, ds_status, ds_error = obter_datasources_modelo(
+        workspace_id, model_id, token
+    )
+
+    if datasources:
+        for ds in datasources:
+            row = {
+                "workspace_id": workspace_id,
+                "workspace_name": workspace_name,
+                "semantic_model_id": model_id,
+                "semantic_model_name": model_name,
+                "datasource_status": ds_status,
+                "datasource_error": ds_error,
+                "scan_at": scan_at,
+            }
+            row.update(connection_details_para_colunas(ds))
+            datasource_rows.append(row)
+    else:
+        datasource_rows.append({
+            "workspace_id": workspace_id,
+            "workspace_name": workspace_name,
+            "semantic_model_id": model_id,
+            "semantic_model_name": model_name,
+            "datasource_status": ds_status,
+            "datasource_error": ds_error,
+            "datasource_type": None,
+            "datasource_id": None,
+            "gateway_id": None,
+            "connection_server": None,
+            "connection_database": None,
+            "connection_url": None,
+            "connection_path": None,
+            "connection_details_json": None,
+            "scan_at": scan_at,
+        })
+
+    # 3B) Table-level source via TMDL (best effort).
+    if tentar_tmdl:
+        definition, tmdl_status, tmdl_error = obter_definition_tmdl(
+            workspace_id, model_id, token
+        )
+
+        if definition:
+            tabelas_tmdl = parsear_tmdl_modelo(definition)
+        else:
+            tabelas_tmdl = []
+
+        if tabelas_tmdl:
+            for t in tabelas_tmdl:
+                row = {
+                    "workspace_id": workspace_id,
+                    "workspace_name": workspace_name,
+                    "semantic_model_id": model_id,
+                    "semantic_model_name": model_name,
+                    "tmdl_status": tmdl_status,
+                    "tmdl_error": tmdl_error,
+                    "scan_at": scan_at,
+                }
+                row.update(t)
+                model_table_rows.append(row)
+        else:
+            # Mantém uma linha de diagnóstico mesmo quando não conseguimos abrir o TMDL.
+            model_table_rows.append({
+                "workspace_id": workspace_id,
+                "workspace_name": workspace_name,
+                "semantic_model_id": model_id,
+                "semantic_model_name": model_name,
+                "model_table": None,
+                "partition_name": None,
+                "partition_kind": None,
+                "partition_mode": None,
+                "source_type": None,
+                "source_server": None,
+                "source_database": None,
+                "source_schema": None,
+                "source_table": None,
+                "source_url": None,
+                "source_resolution": "TMDL_NOT_AVAILABLE",
+                "source_expression_excerpt": None,
+                "tmdl_path": None,
+                "tmdl_status": tmdl_status,
+                "tmdl_error": tmdl_error,
+                "scan_at": scan_at,
+            })
+
+
+df_datasources = pd.DataFrame(datasource_rows)
+df_model_tables = pd.DataFrame(model_table_rows)
+
+print(f"Conexões de datasource: {len(df_datasources)}")
+print(f"Tabelas/modelos TMDL: {len(df_model_tables)}")
+
+
+# ------------------------------------------------------------
+# 4) CONSOLIDADO BI -> MODELO -> TABELA -> FONTE
+# ------------------------------------------------------------
+
+# Filtra reports que usam modelos considerados.
+if not df_reports.empty and not df_modelos.empty:
+    df_reports_validos = df_reports.merge(
+        df_modelos[["semantic_model_id", "semantic_model_name"]],
+        on="semantic_model_id",
+        how="inner",
+    )
+else:
+    df_reports_validos = pd.DataFrame()
+
+# Mantém também modelos sem report, para não perder dependências reutilizadas.
+if not df_model_tables.empty:
+    base_fontes = df_model_tables.copy()
+else:
+    base_fontes = df_modelos.copy()
+    for col in [
+        "model_table", "partition_name", "partition_kind", "partition_mode",
+        "source_type", "source_server", "source_database", "source_schema",
+        "source_table", "source_url", "source_resolution", "tmdl_status",
+        "tmdl_error", "tmdl_path", "source_expression_excerpt"
+    ]:
+        base_fontes[col] = None
+
+# Completa conexão-level quando o TMDL só conseguiu parte da origem.
+if not df_datasources.empty:
+    ds_reduzido = (
+        df_datasources.sort_values(["semantic_model_id"])
+        .drop_duplicates(subset=["semantic_model_id"], keep="first")
+        [[
+            "semantic_model_id", "datasource_type", "connection_server",
+            "connection_database", "connection_url", "connection_path",
+            "datasource_status", "datasource_error"
+        ]]
+    )
+    base_fontes = base_fontes.merge(ds_reduzido, on="semantic_model_id", how="left")
+else:
+    for col in [
+        "datasource_type", "connection_server", "connection_database",
+        "connection_url", "connection_path", "datasource_status", "datasource_error"
+    ]:
+        base_fontes[col] = None
+
+# Fallback: se TMDL não trouxe server/database, usa detalhes da conexão.
+base_fontes["source_type_final"] = base_fontes["source_type"].fillna(base_fontes["datasource_type"])
+base_fontes["source_server_final"] = base_fontes["source_server"].fillna(base_fontes["connection_server"])
+base_fontes["source_database_final"] = base_fontes["source_database"].fillna(base_fontes["connection_database"])
+base_fontes["source_url_final"] = base_fontes["source_url"].fillna(base_fontes["connection_url"])
+
+# Normalizados para o futuro join com log_atividade_scripts.
+base_fontes["source_database_norm"] = base_fontes["source_database_final"].apply(normalizar_chave)
+base_fontes["source_schema_norm"] = base_fontes["source_schema"].apply(normalizar_chave)
+base_fontes["source_table_norm"] = base_fontes["source_table"].apply(normalizar_chave)
+
+base_fontes["source_full_name"] = base_fontes.apply(
+    lambda r: ".".join([
+        x for x in [
+            texto_limpo(r.get("source_database_final")),
+            texto_limpo(r.get("source_schema")),
+            texto_limpo(r.get("source_table")),
+        ] if x
+    ]) or None,
+    axis=1,
+)
+
+# Liga cada modelo aos BIs que o consomem.
+if not df_reports_validos.empty:
+    report_cols = [
+        "workspace_id", "workspace_name", "report_id", "report_name",
+        "semantic_model_id", "report_type", "report_format", "web_url"
+    ]
+    df_final = df_reports_validos[report_cols].merge(
+        base_fontes.drop(columns=["workspace_id", "workspace_name"], errors="ignore"),
+        on="semantic_model_id",
+        how="right",
+    )
+else:
+    df_final = base_fontes.copy()
+    df_final["report_id"] = None
+    df_final["report_name"] = None
+    df_final["report_type"] = None
+    df_final["report_format"] = None
+    df_final["web_url"] = None
+
+# Ordem principal de leitura.
+colunas_primeiro = [
+    "workspace_name",
+    "report_name",
+    "semantic_model_name",
+    "model_table",
+    "source_type_final",
+    "source_server_final",
+    "source_database_final",
+    "source_schema",
+    "source_table",
+    "source_full_name",
+    "source_resolution",
+    "partition_mode",
+    "tmdl_status",
+    "datasource_status",
+    "scan_at",
+]
+
+colunas_existentes = [c for c in colunas_primeiro if c in df_final.columns]
+restante = [c for c in df_final.columns if c not in colunas_existentes]
+df_final = df_final[colunas_existentes + restante]
+
+
+# ------------------------------------------------------------
+# 5) SAÍDA / DIAGNÓSTICO
+# ------------------------------------------------------------
+
+print("\nResumo da resolução das fontes:")
+if "source_resolution" in df_final.columns:
+    print(df_final["source_resolution"].value_counts(dropna=False).to_string())
+
+print("\nAmostra do catálogo final:")
+display(df_final.head(100))
+
+
+# ------------------------------------------------------------
+# 6) SALVAR NO LAKEHOUSE
+# ------------------------------------------------------------
+
+salvar_delta(df_reports, tabela_reports)
+salvar_delta(df_modelos, tabela_modelos)
+salvar_delta(df_datasources, tabela_datasources)
+salvar_delta(df_model_tables, tabela_model_tables)
+salvar_delta(df_final, tabela_catalogo_final)
+
+print("\n" + "=" * 80)
+print("SCAN FINALIZADO")
+print(f"Tabela principal para o BI: {tabela_catalogo_final}")
+print("Próximo passo sugerido: cruzar source_database_norm/source_table_norm")
+print("com DATABASE/TABELA normalizados de controle_gestao.log_atividade_scripts.")
+print("=" * 80)
