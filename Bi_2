@@ -1,0 +1,38 @@
+# ============================================================
+# TABELA ENXUTA PARA O MODELO SEMÂNTICO / POWER BI
+# Não executa novamente o scanner.
+# Lê diretamente a tabela já salva no Lakehouse.
+# ============================================================
+
+from pyspark.sql import functions as F
+
+df_lineage_bi = (
+    spark.table("bi_catalog_fontes_reais")
+    .select(
+        "workspace_name",
+        "report_name",
+        "semantic_model_name",
+        "model_table",
+        "source_database_final",
+        "source_table",
+        "partition_name",
+        "source_table_norm"
+    )
+    .dropDuplicates()
+)
+
+display(df_lineage_bi)
+
+# Salva uma tabela nova e limpa
+(
+    df_lineage_bi.write
+    .format("delta")
+    .mode("overwrite")
+    .option("overwriteSchema", "true")
+    .saveAsTable("bi_catalog_lineage_bi")
+)
+
+print(
+    f"[OK] bi_catalog_lineage_bi criada com "
+    f"{df_lineage_bi.count()} linhas."
+)
