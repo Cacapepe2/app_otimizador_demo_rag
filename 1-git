@@ -1,0 +1,175 @@
+from __future__ import annotations
+
+import os
+from urllib.parse import quote
+import requests
+
+
+class GitLabClient:
+    def __init__(self, base_url: str | None = None, token: str | None = None):
+        self.base_url = (base_url or os.getenv("GITLAB_URL", "")).rstrip("/")
+        self.token = token or os.getenv("GITLAB_TOKEN", "")
+
+        if not self.base_url:
+            raise RuntimeError("Defina a variável de ambiente GITLAB_URL.")
+        if not self.token:
+            raise RuntimeError("Defina a variável de ambiente GITLAB_TOKEN.")
+
+        self.api_url = f"{self.base_url}/api/v4"
+        self.session = requests.Session()
+        self.session.headers.update({"PRIVATE-TOKEN": self.token})
+
+    def _get(self, path: str, params: dict | None = None):
+        r = self.session.get(
+            f"{self.api_url}{path}",
+            params=params,
+            timeout=60,
+        )
+
+        if r.status_code == 401:
+            raise RuntimeError("GitLab retornou 401: token ausente, inválido ou expirado.")
+        if r.status_code == 403:
+            raise RuntimeError("GitLab retornou 403: sem permissão para esta operação.")
+        if r.status_code == 404:
+            raise RuntimeError(f"GitLab retornou 404 para: {r.url}")
+
+        r.raise_for_status()
+        return r
+
+    def whoami(self) -> dict:
+        return self._get("/user").json()
+
+    def get_project(self, project_id: int | str) -> dict:
+        project = quote(str(project_id), safe="")
+        return self._get(f"/projects/{project}").json()
+
+    def search_projects(self, search: str, per_page: int = 100) -> list[dict]:
+        results = []
+        page = 1
+
+        while True:
+            batch = self._get(
+                "/projects",
+                params={
+                    "search": search,
+                    "simple": "true",
+                    "per_page": per_page,
+                    "page": page,
+                    "order_by": "last_activity_at",
+                    "sort": "desc",
+                },
+            ).json()
+
+            results.extend(batch)
+
+            if len(batch) < per_page:
+                break
+
+            page += 1
+
+        return results
+
+    def repository_tree(
+        self,
+        project_id: int | str,
+        ref: str | None = None,
+        recursive: bool = True,
+        per_page: int = 100,
+    ) -> list[dict]:
+        project = quote(str(project_id), safe="")
+        results = []
+        page = 1
+
+        while True:
+            params = {
+                "recursive": str(recursive).lower(),
+                "per_page": per_page,
+                "page": page,
+            }
+
+            if ref:
+                params["ref"] = ref
+
+            batch = self._get(
+                f"/projects/{project}/repository/tree",
+                params=params,
+            ).json()
+
+            results.extend(batch)
+
+            if len(batch) < per_page:
+                break
+
+            page += 1
+
+        return results
+
+    def find_files(
+        self,
+        project_id: int | str,
+        text: str,
+        ref: str | None = None,
+    ) -> list[dict]:
+        term = text.lower().strip()
+        tree = self.repository_tree(project_id, ref=ref, recursive=True)
+
+        return [
+            item
+            for item in tree
+            if term in str(item.get("path", "")).lower()
+        ]
+
+    def search_code(
+        self,
+        project_id: int | str,
+        term: str,
+        per_page: int = 100,
+    ) -> list[dict]:
+        project = quote(str(project_id), safe="")
+        results = []
+        page = 1
+
+        while True:
+            r = self.session.get(
+                f"{self.api_url}/projects/{project}/search",
+                params={
+                    "scope": "blobs",
+                    "search": term,
+                    "per_page": per_page,
+                    "page": page,
+                },
+                timeout=60,
+            )
+
+            if r.status_code in (400, 403, 404):
+                raise RuntimeError(
+                    "A busca de código não está disponível ou não foi permitida "
+                    f"neste GitLab/projeto. HTTP {r.status_code}: {r.text[:300]}"
+                )
+
+            r.raise_for_status()
+            batch = r.json()
+            results.extend(batch)
+
+            if len(batch) < per_page:
+                break
+
+            page += 1
+
+        return results
+
+    def read_file(
+        self,
+        project_id: int | str,
+        file_path: str,
+        ref: str,
+    ) -> str:
+        project = quote(str(project_id), safe="")
+        encoded_path = quote(file_path, safe="")
+
+        r = self._get(
+            f"/projects/{project}/repository/files/{encoded_path}/raw",
+            params={"ref": ref},
+        )
+
+        return r.text
