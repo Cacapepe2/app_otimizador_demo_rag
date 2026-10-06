@@ -1,0 +1,157 @@
+"""
+tools/materializar_gitlab_context.py
+
+Baixa arquivos específicos do GitLab para .generated/gitlab_context/
+sem clonar o repositório inteiro.
+
+Uso genérico:
+    python -m tools.materializar_gitlab_context \
+        --project 98 \
+        --path PMTS_RF.py \
+        --ref master
+
+Você pode repetir --file para vários arquivos:
+    python -m tools.materializar_gitlab_context \
+        --file "98|master|PMTS_RF.py" \
+        --file "426|master|API_LEITURA_HIST_OMNI.py"
+
+Pré-requisitos:
+    GITLAB_URL
+    GITLAB_TOKEN
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+from pathlib import Path
+
+from integrations.gitlab.gitlab_client import GitLabClient
+
+
+ROOT = Path(__file__).resolve().parents[1]
+OUTPUT_ROOT = ROOT / ".generated" / "gitlab_context"
+
+
+def _safe_name(value: str) -> str:
+    value = value.strip().replace("\\", "/")
+    value = re.sub(r"[^A-Za-z0-9._/-]+", "_", value)
+    return value.strip("/")
+
+
+def materializar_arquivo(
+    project_id: int | str,
+    file_path: str,
+    ref: str = "master",
+    client: GitLabClient | None = None,
+) -> dict:
+    client = client or GitLabClient()
+
+    project = client.get_project(project_id)
+    project_name = project.get("path_with_namespace") or str(project_id)
+
+    code = client.read_file(
+        project_id=project_id,
+        file_path=file_path,
+        ref=ref,
+    )
+
+    project_dir = OUTPUT_ROOT / f"{project_id}_{_safe_name(project_name).replace('/', '__')}"
+    local_file = project_dir / _safe_name(file_path)
+
+    local_file.parent.mkdir(parents=True, exist_ok=True)
+    local_file.write_text(code, encoding="utf-8")
+
+    metadata = {
+        "project_id": project_id,
+        "project": project_name,
+        "branch": ref,
+        "gitlab_path": file_path,
+        "local_path": str(local_file.relative_to(ROOT)),
+    }
+
+    metadata_path = local_file.with_suffix(local_file.suffix + ".meta.json")
+    metadata_path.write_text(
+        json.dumps(metadata, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    print("\nArquivo materializado:")
+    print("  Projeto :", project_name)
+    print("  Branch  :", ref)
+    print("  GitLab  :", file_path)
+    print("  Local   :", local_file.relative_to(ROOT))
+
+    return metadata
+
+
+def _parse_file_arg(value: str) -> tuple[str, str, str]:
+    parts = value.split("|", 2)
+    if len(parts) != 3:
+        raise argparse.ArgumentTypeError(
+            'Use o formato "PROJECT_ID|REF|PATH". '
+            'Ex.: "98|master|PMTS_RF.py"'
+        )
+    return parts[0], parts[1], parts[2]
+
+
+def main():
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument("--project")
+    parser.add_argument("--path")
+    parser.add_argument("--ref", default="master")
+
+    parser.add_argument(
+        "--file",
+        action="append",
+        default=[],
+        help='Pode repetir. Formato: "PROJECT_ID|REF|PATH"',
+    )
+
+    args = parser.parse_args()
+
+    requests_to_make: list[tuple[str, str, str]] = []
+
+    if args.project and args.path:
+        requests_to_make.append(
+            (str(args.project), str(args.ref), str(args.path))
+        )
+
+    for value in args.file:
+        requests_to_make.append(_parse_file_arg(value))
+
+    if not requests_to_make:
+        raise SystemExit(
+            "Informe --project + --path ou pelo menos um --file."
+        )
+
+    client = GitLabClient()
+
+    OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+
+    manifest = []
+
+    for project_id, ref, path in requests_to_make:
+        manifest.append(
+            materializar_arquivo(
+                project_id=project_id,
+                file_path=path,
+                ref=ref,
+                client=client,
+            )
+        )
+
+    manifest_path = OUTPUT_ROOT / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    print("\nManifest atualizado:")
+    print(" ", manifest_path.relative_to(ROOT))
+
+
+if __name__ == "__main__":
+    main()
