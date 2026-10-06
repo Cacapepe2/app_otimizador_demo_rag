@@ -1,0 +1,52 @@
+from tools.query_lineage import get_by_bi, get_producers
+from tools.investigar_bi import investigar_bi
+
+
+NOME_BI = "Consulta Equipe Aceitação"
+
+
+print("\n=== TESTE 1: get_by_bi ===")
+
+df_bi = get_by_bi(NOME_BI)
+
+print(df_bi)
+
+
+print("\n=== TESTE 2: produtores da primeira fonte ===")
+
+if not df_bi.empty:
+
+    primeira_linha = df_bi.iloc[0]
+
+    database = primeira_linha["DATABASE_FONTE"]
+    tabela = primeira_linha["TABELA_FONTE"]
+
+    print("Fonte encontrada:")
+    print(database, tabela)
+
+    produtores = get_producers(
+        database,
+        tabela
+    )
+
+    print(produtores)
+
+
+print("\n=== TESTE 3: investigar BI completo ===")
+
+resultado = investigar_bi(
+    NOME_BI
+)
+
+print("\n=== OBJETOS RETORNADOS ===")
+
+print(resultado.keys())
+
+print("\nFONTES:")
+print(resultado["fontes"])
+
+print("\nPRODUTORES:")
+print(resultado["produtores"])
+
+print("\nERROS:")
+print(resultado["erros"])
