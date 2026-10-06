@@ -1,0 +1,142 @@
+"""
+criar_estrutura_mega_brain.py
+
+Por padrão NÃO cria nada; apenas mostra o que seria criado.
+
+Exemplos:
+    python criar_estrutura_mega_brain.py
+    python criar_estrutura_mega_brain.py --apply
+    python criar_estrutura_mega_brain.py --root C:\caminho\mega-brain-data --apply
+
+O script:
+- cria somente pastas/arquivos auxiliares que não existirem;
+- NÃO sobrescreve arquivos existentes;
+- NÃO move seus arquivos atuais automaticamente.
+"""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
+
+PASTAS = [
+    "tools",
+    "lineage",
+    "knowledge",
+    "knowledge/sources",
+    "knowledge/concepts",
+    "knowledge/keys",
+    "knowledge/rules",
+    "knowledge/decisions",
+    "validation",
+    "integrations",
+    "integrations/gitlab",
+    "integrations/fabric",
+    "integrations/powerbi",
+    "code_catalog",
+    "recipes",
+    "powerbi",
+    "powerbi/templates",
+    "powerbi/projects",
+    "scripts",
+    "scripts/setup",
+    "docs",
+    "tests",
+    ".generated",
+    ".generated/impact",
+    ".vscode",
+]
+
+ARQUIVOS_VAZIOS = [
+    "tools/__init__.py",
+    "lineage/__init__.py",
+    "validation/__init__.py",
+    "integrations/__init__.py",
+    "code_catalog/__init__.py",
+]
+
+ARQUIVOS_PLACEHOLDER = {
+    "README.md": "# Mega Brain Data / BI Engineering\n",
+    "AGENTS.md": "# Instruções do Mega Brain\n",
+    "knowledge/index.yaml": "# Índice de conhecimento do Mega Brain\n",
+    "knowledge/decisions/confirmed_rules.yaml": "# Regras confirmadas por humanos\n",
+    "knowledge/keys/grains.yaml": "# Granularidades confirmadas/propostas\n",
+    "knowledge/keys/relationships.yaml": "# Relacionamentos e chaves conhecidas\n",
+    "knowledge/rules/coding.md": "# Regras de código\n",
+    "knowledge/rules/database.md": "# Regras de banco e fontes\n",
+    "knowledge/rules/validation.md": "# Regras de validação\n",
+    "knowledge/rules/powerbi.md": "# Regras de Power BI / PBIP / PBIR / TMDL\n",
+}
+
+
+def montar_plano(root: Path):
+    itens = []
+
+    for pasta in PASTAS:
+        itens.append(("DIR", root / pasta))
+
+    for arquivo in ARQUIVOS_VAZIOS:
+        itens.append(("FILE", root / arquivo))
+
+    for arquivo in ARQUIVOS_PLACEHOLDER:
+        itens.append(("FILE", root / arquivo))
+
+    return itens
+
+
+def aplicar(root: Path):
+    root.mkdir(parents=True, exist_ok=True)
+
+    for pasta in PASTAS:
+        (root / pasta).mkdir(parents=True, exist_ok=True)
+
+    for arquivo in ARQUIVOS_VAZIOS:
+        path = root / arquivo
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.exists():
+            path.write_text("", encoding="utf-8")
+
+    for arquivo, conteudo in ARQUIVOS_PLACEHOLDER.items():
+        path = root / arquivo
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.exists():
+            path.write_text(conteudo, encoding="utf-8")
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--root",
+        default="mega-brain-data",
+        help="Pasta raiz do projeto. Padrão: ./mega-brain-data",
+    )
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Efetivamente cria a estrutura. Sem esta flag é apenas dry-run.",
+    )
+    args = parser.parse_args()
+
+    root = Path(args.root).expanduser().resolve()
+
+    print(f"\nRaiz do projeto: {root}\n")
+    print("Estrutura prevista:")
+
+    for tipo, path in montar_plano(root):
+        estado = "EXISTE" if path.exists() else "CRIAR"
+        print(f"[{tipo:4}] [{estado:6}] {path}")
+
+    if not args.apply:
+        print(
+            "\nDRY-RUN: nada foi criado.\n"
+            "Quando estiver pronto, execute novamente com --apply."
+        )
+        return
+
+    aplicar(root)
+    print("\nEstrutura criada. Nenhum arquivo existente foi sobrescrito.")
+
+
+if __name__ == "__main__":
+    main()
