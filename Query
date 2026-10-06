@@ -1,0 +1,289 @@
+# query_lineage.py
+
+import pandas as pd
+from Conntomysql import Conntomysql
+
+
+# ============================================================
+# CONFIGURAÇÃO
+# ============================================================
+
+c = Conntomysql()
+
+BANCO = "prod"
+DATABASE = "controle_gestao"
+TABELA = "catalog_lineage_master"
+
+
+# Ajuste estes nomes se o export final tiver nomes diferentes
+COLUNAS = """
+`NOME_BI`,
+`SEMANTIC_MODEL`,
+`TABELA_MODELO`,
+`DATABASE_FONTE`,
+`TABELA_FONTE`,
+`CHAVE_FONTE`,
+`SCRIPT`,
+`TIPO`,
+`ULTIMA_EXECUCAO`
+"""
+
+
+# ============================================================
+# AUXILIARES
+# ============================================================
+
+def _sql_text(valor):
+    """
+    Escapa aspas simples para usar o valor com segurança
+    dentro do WHERE.
+    """
+    if valor is None:
+        return None
+
+    return str(valor).strip().replace("'", "''")
+
+
+def _normalizar(valor):
+    if valor is None:
+        return None
+
+    return str(valor).strip().lower()
+
+
+def _ler(where=None):
+
+    kwargs = {
+        "database": DATABASE,
+        "tabela": TABELA,
+        "banco": BANCO,
+        "colunas": COLUNAS
+    }
+
+    if where:
+        kwargs["where"] = where
+
+    df = c.read_sql(**kwargs)
+
+    return df
+
+
+# ============================================================
+# 1. BUSCAR POR FONTE
+# ============================================================
+
+def get_by_source(database, table):
+
+    database = _sql_text(_normalizar(database))
+    table = _sql_text(_normalizar(table))
+
+    chave = f"{database}|{table}"
+
+    where = f"""
+    (`CHAVE_FONTE` = '{chave}')
+    """
+
+    return _ler(where)
+
+
+# ============================================================
+# 2. BUSCAR POR BI
+# ============================================================
+
+def get_by_bi(bi):
+
+    bi = _sql_text(bi)
+
+    where = f"""
+    (`NOME_BI` = '{bi}')
+    """
+
+    return _ler(where)
+
+
+# ============================================================
+# 3. BUSCAR POR SCRIPT
+# ============================================================
+
+def get_by_script(script):
+
+    script = _sql_text(script)
+
+    where = f"""
+    (`SCRIPT` = '{script}')
+    """
+
+    return _ler(where)
+
+
+# ============================================================
+# 4. PRODUTORES
+# ============================================================
+
+def get_producers(database, table):
+
+    df = get_by_source(database, table)
+
+    if df.empty:
+        return df
+
+    return (
+        df[
+            df["TIPO"]
+            .astype(str)
+            .str.strip()
+            .str.lower()
+            .eq("escrita")
+        ]
+        .drop_duplicates(
+            subset=[
+                "CHAVE_FONTE",
+                "SCRIPT"
+            ]
+        )
+        .reset_index(drop=True)
+    )
+
+
+# ============================================================
+# 5. CONSUMIDORES
+# ============================================================
+
+def get_consumers(database, table):
+
+    df = get_by_source(database, table)
+
+    if df.empty:
+        return df
+
+    return (
+        df[
+            df["TIPO"]
+            .astype(str)
+            .str.strip()
+            .str.lower()
+            .eq("leitura")
+        ]
+        .drop_duplicates(
+            subset=[
+                "CHAVE_FONTE",
+                "SCRIPT"
+            ]
+        )
+        .reset_index(drop=True)
+    )
+
+
+# ============================================================
+# 6. IMPACT ANALYSIS RESUMIDO
+# ============================================================
+
+def get_impact(database, table):
+
+    df = get_by_source(database, table)
+
+    if df.empty:
+        return {
+            "fonte": f"{database}.{table}",
+            "encontrado": False,
+            "bis": [],
+            "modelos_semanticos": [],
+            "tabelas_modelo": [],
+            "produtores": [],
+            "consumidores": []
+        }
+
+    tipo = (
+        df["TIPO"]
+        .astype(str)
+        .str.strip()
+        .str.lower()
+    )
+
+    produtores = (
+        df.loc[tipo.eq("escrita"), "SCRIPT"]
+        .dropna()
+        .drop_duplicates()
+        .tolist()
+    )
+
+    consumidores = (
+        df.loc[tipo.eq("leitura"), "SCRIPT"]
+        .dropna()
+        .drop_duplicates()
+        .tolist()
+    )
+
+    bis = (
+        df["NOME_BI"]
+        .dropna()
+        .drop_duplicates()
+        .tolist()
+    )
+
+    modelos = (
+        df["SEMANTIC_MODEL"]
+        .dropna()
+        .drop_duplicates()
+        .tolist()
+    )
+
+    tabelas_modelo = (
+        df["TABELA_MODELO"]
+        .dropna()
+        .drop_duplicates()
+        .tolist()
+    )
+
+    return {
+        "fonte": f"{database}.{table}",
+        "encontrado": True,
+        "bis": bis,
+        "modelos_semanticos": modelos,
+        "tabelas_modelo": tabelas_modelo,
+        "produtores": produtores,
+        "consumidores": consumidores
+    }
+
+
+# ============================================================
+# 7. PRINT AMIGÁVEL
+# ============================================================
+
+def print_impact(database, table):
+
+    impacto = get_impact(database, table)
+
+    print("=" * 70)
+    print(f"FONTE: {impacto['fonte']}")
+    print("=" * 70)
+
+    if not impacto["encontrado"]:
+        print("Fonte não encontrada no catálogo.")
+        return
+
+    print("\nBIs:")
+    for item in impacto["bis"]:
+        print(f"  - {item}")
+
+    print("\nModelos semânticos:")
+    for item in impacto["modelos_semanticos"]:
+        print(f"  - {item}")
+
+    print("\nTabelas no modelo:")
+    for item in impacto["tabelas_modelo"]:
+        print(f"  - {item}")
+
+    print("\nScripts que ESCREVEM:")
+    if impacto["produtores"]:
+        for item in impacto["produtores"]:
+            print(f"  - {item}")
+    else:
+        print("  Nenhum encontrado.")
+
+    print("\nScripts que LEEM:")
+    if impacto["consumidores"]:
+        for item in impacto["consumidores"]:
+            print(f"  - {item}")
+    else:
+        print("  Nenhum encontrado.")
