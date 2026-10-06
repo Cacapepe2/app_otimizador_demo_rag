@@ -1,0 +1,201 @@
+"""
+investigar_bi.py
+
+Uso:
+    python -m tools.investigar_bi "Consulta Equipe Aceitação"
+
+Ou, de outro módulo:
+    from tools.investigar_bi import investigar_bi
+    resultado = investigar_bi("Consulta Equipe Aceitação")
+
+Pré-requisito:
+    tools/query_lineage.py deve expor:
+        - get_by_bi(nome_bi)
+        - get_producers(database, table)
+"""
+
+from __future__ import annotations
+
+import sys
+from typing import Dict
+
+import pandas as pd
+
+from tools.query_lineage import get_by_bi, get_producers
+
+
+COLUNAS_FONTE = [
+    "NOME_BI",
+    "SEMANTIC_MODEL",
+    "TABELA_MODELO",
+    "DATABASE_FONTE",
+    "TABELA_FONTE",
+    "CHAVE_FONTE",
+]
+
+
+def _colunas_existentes(df: pd.DataFrame, colunas: list[str]) -> list[str]:
+    return [c for c in colunas if c in df.columns]
+
+
+def _normalizar_texto(valor) -> str:
+    if pd.isna(valor):
+        return ""
+    return str(valor).strip()
+
+
+def investigar_bi(nome_bi: str, exibir: bool = True) -> Dict[str, pd.DataFrame]:
+    """
+    Consulta o BI e procura produtores de todas as fontes físicas encontradas.
+    """
+
+    lineage_bi = get_by_bi(nome_bi)
+
+    if lineage_bi is None or lineage_bi.empty:
+        if exibir:
+            print(f'\nNenhum lineage encontrado para o BI: "{nome_bi}"')
+        return {
+            "lineage_bi": pd.DataFrame(),
+            "fontes": pd.DataFrame(),
+            "produtores": pd.DataFrame(),
+            "erros": pd.DataFrame(),
+        }
+
+    obrigatorias = ["DATABASE_FONTE", "TABELA_FONTE"]
+    faltantes = [c for c in obrigatorias if c not in lineage_bi.columns]
+
+    if faltantes:
+        raise KeyError(
+            "O resultado de get_by_bi não possui as colunas necessárias: "
+            + ", ".join(faltantes)
+        )
+
+    colunas_fontes = _colunas_existentes(lineage_bi, COLUNAS_FONTE)
+
+    fontes = (
+        lineage_bi[colunas_fontes]
+        .copy()
+        .dropna(subset=["DATABASE_FONTE", "TABELA_FONTE"])
+    )
+
+    fontes["DATABASE_FONTE"] = fontes["DATABASE_FONTE"].map(_normalizar_texto)
+    fontes["TABELA_FONTE"] = fontes["TABELA_FONTE"].map(_normalizar_texto)
+
+    fontes = fontes[
+        fontes["DATABASE_FONTE"].ne("")
+        & fontes["TABELA_FONTE"].ne("")
+    ]
+
+    fontes_unicas = (
+        fontes[["DATABASE_FONTE", "TABELA_FONTE"]]
+        .drop_duplicates()
+        .reset_index(drop=True)
+    )
+
+    produtores_lista = []
+    erros = []
+
+    for _, fonte in fontes_unicas.iterrows():
+        database = fonte["DATABASE_FONTE"]
+        table = fonte["TABELA_FONTE"]
+
+        try:
+            produtores = get_producers(database, table)
+
+            if produtores is None or produtores.empty:
+                erros.append(
+                    {
+                        "DATABASE_FONTE": database,
+                        "TABELA_FONTE": table,
+                        "STATUS": "SEM_PRODUTOR_ENCONTRADO",
+                        "ERRO": "",
+                    }
+                )
+                continue
+
+            produtores = produtores.copy()
+            produtores.insert(0, "FONTE_CONSULTADA_DATABASE", database)
+            produtores.insert(1, "FONTE_CONSULTADA_TABELA", table)
+            produtores_lista.append(produtores)
+
+        except Exception as exc:
+            erros.append(
+                {
+                    "DATABASE_FONTE": database,
+                    "TABELA_FONTE": table,
+                    "STATUS": "ERRO",
+                    "ERRO": str(exc),
+                }
+            )
+
+    if produtores_lista:
+        produtores_df = pd.concat(produtores_lista, ignore_index=True)
+
+        subset_dedup = [
+            c
+            for c in [
+                "FONTE_CONSULTADA_DATABASE",
+                "FONTE_CONSULTADA_TABELA",
+                "SCRIPT",
+            ]
+            if c in produtores_df.columns
+        ]
+
+        if subset_dedup:
+            produtores_df = produtores_df.drop_duplicates(subset=subset_dedup)
+        else:
+            produtores_df = produtores_df.drop_duplicates()
+
+        produtores_df = produtores_df.reset_index(drop=True)
+    else:
+        produtores_df = pd.DataFrame()
+
+    erros_df = pd.DataFrame(erros)
+
+    if exibir:
+        print("\n" + "=" * 90)
+        print(f'BI: {nome_bi}')
+        print("=" * 90)
+
+        print(f"\nFontes físicas únicas encontradas: {len(fontes_unicas)}")
+        if not fontes_unicas.empty:
+            print(fontes_unicas.to_string(index=False))
+
+        print(f"\nScripts produtores encontrados: {len(produtores_df)}")
+        if not produtores_df.empty:
+            colunas_exibir = _colunas_existentes(
+                produtores_df,
+                [
+                    "FONTE_CONSULTADA_DATABASE",
+                    "FONTE_CONSULTADA_TABELA",
+                    "SCRIPT",
+                    "TIPO",
+                    "ULTIMA_EXECUCAO",
+                ],
+            )
+            print(produtores_df[colunas_exibir].to_string(index=False))
+        else:
+            print("Nenhum produtor encontrado.")
+
+        if not erros_df.empty:
+            print("\nFontes sem produtor ou com erro:")
+            print(erros_df.to_string(index=False))
+
+    return {
+        "lineage_bi": lineage_bi,
+        "fontes": fontes,
+        "produtores": produtores_df,
+        "erros": erros_df,
+    }
+
+
+if __name__ == "__main__":
+    if len(sys.argv) >= 2:
+        nome = " ".join(sys.argv[1:]).strip()
+    else:
+        nome = input("Digite o nome exato do BI: ").strip()
+
+    if not nome:
+        raise SystemExit("Nome do BI não informado.")
+
+    investigar_bi(nome)
