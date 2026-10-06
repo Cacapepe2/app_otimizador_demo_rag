@@ -1,0 +1,32 @@
+from integrations.gitlab.gitlab_client import GitLabClient
+
+
+def main():
+    gl = GitLabClient()
+
+    usuario = gl.whoami()
+
+    print("=" * 70)
+    print("GITLAB API CONECTADA")
+    print("=" * 70)
+    print("Usuário:", usuario.get("username"))
+    print("Nome:", usuario.get("name"))
+    print("ID:", usuario.get("id"))
+
+    print("\nTeste de busca de projeto: ACEITACAO")
+    projetos = gl.search_projects("ACEITACAO")
+
+    if not projetos:
+        print("Nenhum projeto encontrado com esse termo.")
+        return
+
+    for p in projetos[:10]:
+        print(
+            f"- ID={p.get('id')} | "
+            f"{p.get('path_with_namespace')} | "
+            f"default_branch={p.get('default_branch')}"
+        )
+
+
+if __name__ == "__main__":
+    main()
