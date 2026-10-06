@@ -1,0 +1,275 @@
+"""
+tools/investigar_bi_gitlab.py
+
+Primeiro fluxo ponta-a-ponta do Mega Brain em modo INVESTIGAR.
+
+Fluxo:
+1. consulta o BI pelo lineage;
+2. extrai scripts produtores das fontes do BI;
+3. procura esses scripts no GitLab;
+4. procura termos de negócio nos repositórios onde os produtores foram encontrados.
+
+Não modifica GitLab, banco ou BI.
+
+Uso:
+    python -m tools.investigar_bi_gitlab "Consulta da Equipe Aceitação"
+
+Ou:
+    python -m tools.investigar_bi_gitlab "Consulta da Equipe Aceitação" gabinete GABINETE cabinet
+"""
+
+from __future__ import annotations
+
+import sys
+import pandas as pd
+
+from tools.investigar_bi import investigar_bi
+from integrations.gitlab.gitlab_search import GitLabSearch
+
+
+DEFAULT_TERMS = [
+    "gabinete",
+    "GABINETE",
+    "gabinetes",
+    "cabinet",
+]
+
+
+def _scripts_produtores(resultado: dict) -> list[str]:
+    df = resultado.get("produtores")
+
+    if df is None or df.empty or "SCRIPT" not in df.columns:
+        return []
+
+    return (
+        df["SCRIPT"]
+        .dropna()
+        .astype(str)
+        .str.strip()
+        .loc[lambda s: s.ne("")]
+        .drop_duplicates()
+        .tolist()
+    )
+
+
+def _candidate_search_terms(
+    nome_bi: str,
+    resultado: dict,
+    scripts: list[str],
+) -> list[str]:
+    terms: list[str] = []
+
+    # Partes do nome do BI.
+    for token in nome_bi.replace("-", " ").replace("_", " ").split():
+        if len(token) >= 4:
+            terms.append(token)
+
+    # Database/tabela das fontes.
+    fontes = resultado.get("fontes")
+
+    if fontes is not None and not fontes.empty:
+        for column in ["DATABASE_FONTE", "TABELA_FONTE"]:
+            if column in fontes.columns:
+                values = (
+                    fontes[column]
+                    .dropna()
+                    .astype(str)
+                    .str.strip()
+                    .tolist()
+                )
+
+                for value in values:
+                    terms.append(value)
+
+                    for token in value.replace("-", "_").split("_"):
+                        if len(token) >= 4:
+                            terms.append(token)
+
+    # Nomes dos scripts também ajudam a encontrar o repo.
+    for script in scripts:
+        stem = script.rsplit(".", 1)[0]
+        terms.append(stem)
+
+        for token in stem.replace("-", "_").split("_"):
+            if len(token) >= 4:
+                terms.append(token)
+
+    # Termos úteis para este domínio.
+    terms.extend(
+        [
+            "ACEITACAO",
+            "PMTS",
+            "DATAVIEW",
+            "MALHA_RF",
+        ]
+    )
+
+    # Remove duplicados preservando ordem.
+    return list(dict.fromkeys(t for t in terms if t))
+
+
+def investigar_bi_gitlab(
+    nome_bi: str,
+    termos_negocio: list[str] | None = None,
+):
+    termos_negocio = termos_negocio or DEFAULT_TERMS
+
+    print("=" * 90)
+    print("MEGA BRAIN - INVESTIGAR BI + GITLAB")
+    print("=" * 90)
+    print("BI:", nome_bi)
+
+    # ------------------------------------------------------------
+    # 1. LINEAGE
+    # ------------------------------------------------------------
+
+    resultado = investigar_bi(
+        nome_bi,
+        exibir=True,
+    )
+
+    scripts = _scripts_produtores(resultado)
+
+    print("\n" + "=" * 90)
+    print("SCRIPTS PRODUTORES EXTRAÍDOS DO LINEAGE")
+    print("=" * 90)
+
+    if not scripts:
+        print("Nenhum script produtor encontrado.")
+        return {
+            "lineage": resultado,
+            "scripts": [],
+            "gitlab_scripts": [],
+            "termos_encontrados": [],
+        }
+
+    for script in scripts:
+        print("-", script)
+
+    # ------------------------------------------------------------
+    # 2. PROJETOS CANDIDATOS
+    # ------------------------------------------------------------
+
+    search = GitLabSearch()
+
+    search_terms = _candidate_search_terms(
+        nome_bi=nome_bi,
+        resultado=resultado,
+        scripts=scripts,
+    )
+
+    print("\n" + "=" * 90)
+    print("TERMOS USADOS PARA REDUZIR O UNIVERSO DE PROJETOS")
+    print("=" * 90)
+
+    print(search_terms)
+
+    # ------------------------------------------------------------
+    # 3. LOCALIZAR SCRIPTS DO LINEAGE NO GITLAB
+    # ------------------------------------------------------------
+
+    gitlab_scripts = search.find_scripts(
+        script_names=scripts,
+        project_search_terms=search_terms,
+        max_projects=80,
+    )
+
+    print("\n" + "=" * 90)
+    print("SCRIPTS LOCALIZADOS NO GITLAB")
+    print("=" * 90)
+
+    if not gitlab_scripts:
+        print("Nenhum script do lineage foi localizado nos projetos candidatos.")
+    else:
+        df_scripts = pd.DataFrame(gitlab_scripts)
+        print(df_scripts.to_string(index=False))
+
+    # ------------------------------------------------------------
+    # 4. PROCURAR TERMOS APENAS NOS REPOS RELEVANTES
+    # ------------------------------------------------------------
+
+    repos = {}
+
+    for item in gitlab_scripts:
+        key = (
+            item["project_id"],
+            item["branch"],
+            item["project"],
+        )
+        repos[key] = True
+
+    termo_matches: list[dict] = []
+
+    print("\n" + "=" * 90)
+    print("BUSCA DE TERMOS DE NEGÓCIO NOS REPOSITÓRIOS RELEVANTES")
+    print("=" * 90)
+
+    for project_id, branch, project_name in repos.keys():
+        print(f"\nProjeto: {project_name}")
+        print(f"Branch: {branch}")
+
+        matches = search.search_terms_in_repository(
+            project_id=project_id,
+            branch=branch,
+            terms=termos_negocio,
+        )
+
+        for match in matches:
+            match["project"] = project_name
+
+        termo_matches.extend(matches)
+
+    if termo_matches:
+        print("\n" + "=" * 90)
+        print("TERMOS ENCONTRADOS")
+        print("=" * 90)
+
+        df_matches = pd.DataFrame(termo_matches)
+
+        cols = [
+            c
+            for c in [
+                "project",
+                "project_id",
+                "branch",
+                "term",
+                "path",
+            ]
+            if c in df_matches.columns
+        ]
+
+        print(
+            df_matches[cols]
+            .drop_duplicates()
+            .to_string(index=False)
+        )
+    else:
+        print("\nNenhum dos termos foi encontrado pela Search API.")
+
+    return {
+        "lineage": resultado,
+        "scripts": scripts,
+        "gitlab_scripts": gitlab_scripts,
+        "termos_encontrados": termo_matches,
+    }
+
+
+def main():
+    if len(sys.argv) < 2:
+        raise SystemExit(
+            'Uso: python -m tools.investigar_bi_gitlab '
+            '"Nome do BI" [termo1 termo2 ...]'
+        )
+
+    nome_bi = sys.argv[1]
+
+    termos = sys.argv[2:] or DEFAULT_TERMS
+
+    investigar_bi_gitlab(
+        nome_bi=nome_bi,
+        termos_negocio=termos,
+    )
+
+
+if __name__ == "__main__":
+    main()
